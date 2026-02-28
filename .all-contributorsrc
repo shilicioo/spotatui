@@ -157,6 +157,16 @@
         "code",
         "bug"
       ]
+    },
+    {
+      "login": "wrsturgeon",
+      "name": "Will Sturgeon",
+      "avatar_url": "https://avatars.githubusercontent.com/u/79714036?v=4",
+      "profile": "https://github.com/wrsturgeon",
+      "contributions": [
+        "code",
+        "bug"
+      ]
     }
   ],
   "contributorsPerLine": 7,
