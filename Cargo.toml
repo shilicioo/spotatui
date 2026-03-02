@@ -91,6 +91,7 @@ mpris-server = { version = "0.9", optional = true }
 librespot-playback = { version = "0.8", optional = true, default-features = false, features = ["portaudio-backend"] }
 objc2-media-player = { version = "0.3", optional = true }
 objc2-foundation = { version = "0.3", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["NSImage"] }
 objc2 = { version = "0.6", optional = true }
 block2 = { version = "0.6", optional = true }
 
@@ -110,7 +111,7 @@ gstreamer-backend = ["streaming", "librespot-playback/gstreamer-backend"]
 audio-viz = ["realfft", "pipewire"]
 audio-viz-cpal = ["realfft", "cpal"]  # Alternative for Windows/macOS or if pipewire issues
 mpris = ["mpris-server", "streaming"]  # MPRIS D-Bus integration (Linux only, requires streaming)
-macos-media = ["objc2-media-player", "objc2-foundation", "objc2", "block2", "streaming"]  # macOS Now Playing integration
+macos-media = ["objc2-media-player", "objc2-foundation", "objc2-app-kit", "objc2", "block2", "streaming"]  # macOS Now Playing integration
 discord-rpc = ["discord-rich-presence"]
 cover-art = ["ratatui-image", "image"]
 

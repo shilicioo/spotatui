@@ -12,10 +12,13 @@ use block2::RcBlock;
 use log::info;
 use objc2::msg_send;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2_foundation::{NSDate, NSMutableDictionary, NSNumber, NSRunLoop, NSString};
+use objc2::AnyThread;
+use objc2_app_kit::NSImage;
+use objc2_foundation::{NSData, NSDate, NSMutableDictionary, NSNumber, NSRunLoop, NSString};
 use objc2_media_player::{
-  MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist, MPMediaItemPropertyPlaybackDuration,
-  MPMediaItemPropertyTitle, MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyElapsedPlaybackTime,
+  MPMediaItemArtwork, MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist,
+  MPMediaItemPropertyArtwork, MPMediaItemPropertyPlaybackDuration, MPMediaItemPropertyTitle,
+  MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyElapsedPlaybackTime,
   MPNowPlayingInfoPropertyPlaybackRate, MPNowPlayingPlaybackState, MPRemoteCommandCenter,
   MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
 };
@@ -45,6 +48,7 @@ pub enum MacMediaCommand {
     artists: Vec<String>,
     album: String,
     duration_ms: u32,
+    art_url: Option<String>,
   },
   SetPlaybackStatus(bool), // true = playing, false = paused
   SetPosition(u64),        // position in milliseconds
@@ -193,7 +197,7 @@ impl MacMediaManager {
         loop {
           tokio::select! {
             Some(cmd) = command_rx.recv() => {
-              handle_now_playing_command(&cmd, &info_center);
+              handle_now_playing_command(&cmd, &info_center).await;
             }
             _ = interval.tick() => {
               NSRunLoop::currentRunLoop()
@@ -218,12 +222,20 @@ impl MacMediaManager {
   }
 
   /// Update track metadata
-  pub fn set_metadata(&self, title: &str, artists: &[String], album: &str, duration_ms: u32) {
+  pub fn set_metadata(
+    &self,
+    title: &str,
+    artists: &[String],
+    album: &str,
+    duration_ms: u32,
+    art_url: Option<String>,
+  ) {
     let _ = self.command_tx.send(MacMediaCommand::SetMetadata {
       title: title.to_string(),
       artists: artists.to_vec(),
       album: album.to_string(),
       duration_ms,
+      art_url,
     });
   }
 
@@ -257,15 +269,21 @@ impl MacMediaManager {
 
 /// Process a single Now Playing command, updating the info center state.
 /// Must be called from the dedicated macOS media thread that owns `info_center`.
-fn handle_now_playing_command(cmd: &MacMediaCommand, info_center: &MPNowPlayingInfoCenter) {
-  unsafe {
-    match cmd {
-      MacMediaCommand::SetMetadata {
-        title,
-        artists,
-        album,
-        duration_ms,
-      } => {
+async fn handle_now_playing_command(cmd: &MacMediaCommand, info_center: &MPNowPlayingInfoCenter) {
+  match cmd {
+    MacMediaCommand::SetMetadata {
+      title,
+      artists,
+      album,
+      duration_ms,
+      art_url,
+    } => {
+      let artwork = match art_url.as_deref() {
+        Some(url) => fetch_artwork_from_url(url).await,
+        None => None,
+      };
+
+      unsafe {
         let dict: objc2::rc::Retained<NSMutableDictionary<NSString, AnyObject>> =
           NSMutableDictionary::new();
 
@@ -284,43 +302,73 @@ fn handle_now_playing_command(cmd: &MacMediaCommand, info_center: &MPNowPlayingI
         let rate = NSNumber::numberWithDouble(1.0);
         dict.insert(MPNowPlayingInfoPropertyPlaybackRate, &*rate);
 
+        if let Some(artwork) = artwork.as_ref() {
+          dict.insert(MPMediaItemPropertyArtwork, &**artwork);
+        }
+
         info_center.setNowPlayingInfo(Some(&dict));
       }
-      MacMediaCommand::SetPlaybackStatus(is_playing) => {
-        let state = if *is_playing {
-          MPNowPlayingPlaybackState::Playing
-        } else {
-          MPNowPlayingPlaybackState::Paused
-        };
-        info_center.setPlaybackState(state);
-
-        // Update playback rate in the existing nowPlayingInfo so macOS
-        // knows whether to advance the elapsed time counter.
-        if let Some(existing) = info_center.nowPlayingInfo() {
-          let dict: objc2::rc::Retained<NSMutableDictionary<NSString, AnyObject>> =
-            NSMutableDictionary::dictionaryWithDictionary(&existing);
-          let rate = NSNumber::numberWithDouble(if *is_playing { 1.0 } else { 0.0 });
-          dict.insert(MPNowPlayingInfoPropertyPlaybackRate, &*rate);
-          info_center.setNowPlayingInfo(Some(&dict));
-        }
-      }
-      MacMediaCommand::SetPosition(position_ms) => {
-        // Update elapsed playback time in the existing nowPlayingInfo dict
-        if let Some(existing) = info_center.nowPlayingInfo() {
-          let dict: objc2::rc::Retained<NSMutableDictionary<NSString, AnyObject>> =
-            NSMutableDictionary::dictionaryWithDictionary(&existing);
-          let elapsed = NSNumber::numberWithDouble(*position_ms as f64 / 1000.0);
-          dict.insert(MPNowPlayingInfoPropertyElapsedPlaybackTime, &*elapsed);
-          info_center.setNowPlayingInfo(Some(&dict));
-        }
-      }
-      MacMediaCommand::SetVolume(_) => {
-        // Volume is not directly supported by Now Playing center
-      }
-      MacMediaCommand::SetStopped => {
-        info_center.setPlaybackState(MPNowPlayingPlaybackState::Stopped);
-        info_center.setNowPlayingInfo(None);
-      }
     }
+    MacMediaCommand::SetPlaybackStatus(is_playing) => unsafe {
+      let state = if *is_playing {
+        MPNowPlayingPlaybackState::Playing
+      } else {
+        MPNowPlayingPlaybackState::Paused
+      };
+      info_center.setPlaybackState(state);
+
+      // Update playback rate in the existing nowPlayingInfo so macOS
+      // knows whether to advance the elapsed time counter.
+      if let Some(existing) = info_center.nowPlayingInfo() {
+        let dict: objc2::rc::Retained<NSMutableDictionary<NSString, AnyObject>> =
+          NSMutableDictionary::dictionaryWithDictionary(&existing);
+        let rate = NSNumber::numberWithDouble(if *is_playing { 1.0 } else { 0.0 });
+        dict.insert(MPNowPlayingInfoPropertyPlaybackRate, &*rate);
+        info_center.setNowPlayingInfo(Some(&dict));
+      }
+    },
+    MacMediaCommand::SetPosition(position_ms) => unsafe {
+      // Update elapsed playback time in the existing nowPlayingInfo dict
+      if let Some(existing) = info_center.nowPlayingInfo() {
+        let dict: objc2::rc::Retained<NSMutableDictionary<NSString, AnyObject>> =
+          NSMutableDictionary::dictionaryWithDictionary(&existing);
+        let elapsed = NSNumber::numberWithDouble(*position_ms as f64 / 1000.0);
+        dict.insert(MPNowPlayingInfoPropertyElapsedPlaybackTime, &*elapsed);
+        info_center.setNowPlayingInfo(Some(&dict));
+      }
+    },
+    MacMediaCommand::SetVolume(_) => {
+      // Volume is not directly supported by Now Playing center
+    }
+    MacMediaCommand::SetStopped => unsafe {
+      info_center.setPlaybackState(MPNowPlayingPlaybackState::Stopped);
+      info_center.setNowPlayingInfo(None);
+    },
+  }
+}
+
+async fn fetch_artwork_from_url(art_url: &str) -> Option<objc2::rc::Retained<MPMediaItemArtwork>> {
+  let response = reqwest::get(art_url).await.ok()?;
+  if !response.status().is_success() {
+    return None;
+  }
+
+  let bytes = response.bytes().await.ok()?;
+  if bytes.is_empty() {
+    return None;
+  }
+
+  unsafe {
+    let data = NSData::dataWithBytes_length(bytes.as_ptr().cast(), bytes.len());
+    let image = NSImage::initWithData(NSImage::alloc(), &data)?;
+    let image_for_handler = image.clone();
+    let request_handler =
+      RcBlock::new(move |_requested_size| NonNull::from(image_for_handler.as_ref()));
+
+    Some(MPMediaItemArtwork::initWithBoundsSize_requestHandler(
+      MPMediaItemArtwork::alloc(),
+      image.size(),
+      &request_handler,
+    ))
   }
 }

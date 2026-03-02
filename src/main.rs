@@ -143,6 +143,18 @@ struct MprisMetadata {
 #[cfg(feature = "mpris")]
 type MprisMetadataTuple = (String, Vec<String>, String, u32, Option<String>);
 
+#[cfg(all(feature = "macos-media", target_os = "macos"))]
+#[derive(Default, PartialEq)]
+struct MacosMetadata {
+  title: String,
+  artists: Vec<String>,
+  album: String,
+  duration_ms: u32,
+  art_url: Option<String>,
+}
+#[cfg(all(feature = "macos-media", target_os = "macos"))]
+type MacosMetadataTuple = (String, Vec<String>, String, u32, Option<String>);
+
 #[cfg(feature = "discord-rpc")]
 fn resolve_discord_app_id(user_config: &UserConfig) -> Option<String> {
   std::env::var("SPOTATUI_DISCORD_APP_ID")
@@ -256,6 +268,34 @@ fn get_mpris_metadata(app: &App) -> Option<MprisMetadataTuple> {
   }
 }
 
+#[cfg(all(feature = "macos-media", target_os = "macos"))]
+fn get_macos_metadata(app: &App) -> Option<MacosMetadataTuple> {
+  use crate::tui::ui::util::create_artist_string;
+  use rspotify::model::PlayableItem;
+
+  if let Some(context) = &app.current_playback_context {
+    let item = context.item.as_ref()?;
+    match item {
+      PlayableItem::Track(track) => Some((
+        track.name.clone(),
+        vec![create_artist_string(&track.artists)],
+        track.album.name.clone(),
+        track.duration.num_milliseconds() as u32,
+        track.album.images.first().map(|image| image.url.clone()),
+      )),
+      PlayableItem::Episode(episode) => Some((
+        episode.name.clone(),
+        vec![episode.show.name.clone()],
+        String::new(),
+        episode.duration.num_milliseconds() as u32,
+        episode.images.first().map(|image| image.url.clone()),
+      )),
+    }
+  } else {
+    None
+  }
+}
+
 #[cfg(feature = "discord-rpc")]
 fn update_discord_presence(
   manager: &discord_rpc::DiscordRpcManager,
@@ -322,6 +362,31 @@ fn update_mpris_metadata(
     if last_metadata.is_some() {
       *last_metadata = None;
     }
+  }
+}
+
+#[cfg(all(feature = "macos-media", target_os = "macos"))]
+fn update_macos_metadata(
+  manager: &macos_media::MacMediaManager,
+  last_metadata: &mut Option<MacosMetadata>,
+  app: &App,
+) {
+  if let Some((title, artists, album, duration_ms, art_url)) = get_macos_metadata(app) {
+    let new_metadata = MacosMetadata {
+      title: title.clone(),
+      artists: artists.clone(),
+      album: album.clone(),
+      duration_ms,
+      art_url: art_url.clone(),
+    };
+
+    // Only update if metadata changed to avoid repeated artwork fetches.
+    if last_metadata.as_ref() != Some(&new_metadata) {
+      manager.set_metadata(&title, &artists, &album, duration_ms, art_url);
+      *last_metadata = Some(new_metadata);
+    }
+  } else if last_metadata.is_some() {
+    *last_metadata = None;
   }
 }
 
@@ -1199,6 +1264,25 @@ of the app. Beware that this comes at a CPU cost!",
       }
     }
 
+    // Keep Now Playing metadata (including artwork URL from Web API playback state)
+    // synchronized with Control Center.
+    #[cfg(all(feature = "macos-media", target_os = "macos"))]
+    if let Some(ref macos_media) = macos_media_manager {
+      let macos_media_for_metadata = Arc::clone(macos_media);
+      let app_for_macos_metadata = Arc::clone(&app);
+      tokio::spawn(async move {
+        let mut last_metadata: Option<MacosMetadata> = None;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+        loop {
+          interval.tick().await;
+          if let Ok(app) = app_for_macos_metadata.try_lock() {
+            update_macos_metadata(&macos_media_for_metadata, &mut last_metadata, &app);
+          }
+        }
+      });
+    }
+
     // Clone MPRIS manager for player event handler
     #[cfg(all(feature = "mpris", target_os = "linux"))]
     let mpris_for_events = mpris_manager.clone();
@@ -1709,7 +1793,13 @@ async fn handle_player_events(
         // Update macOS Now Playing metadata
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_metadata(&audio_item.name, &artists, &album, audio_item.duration_ms);
+          macos_media.set_metadata(
+            &audio_item.name,
+            &artists,
+            &album,
+            audio_item.duration_ms,
+            None,
+          );
         }
 
         // Track metadata updates are critical for playbar correctness; do not drop
