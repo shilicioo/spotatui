@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.37.2] - 2026-03-04
+
+### Fixed
+
+- **macOS Build Feature Missing**: Fixed missing `macos-media` feature flag in CD workflow for macOS runners, preventing native media controls from working correctly.
+
 ## [0.37.1] - 2026-03-03
 
 ### Added
