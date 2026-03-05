@@ -61,7 +61,7 @@ fn open_settings(app: &mut App) {
 
 pub fn handle_app(key: Key, app: &mut App) {
   if app.get_current_route().active_block == ActiveBlock::Settings
-    && app.settings_unsaved_prompt_visible
+    && (app.settings_unsaved_prompt_visible || app.settings_edit_mode)
   {
     settings::handler(key, app);
     return;

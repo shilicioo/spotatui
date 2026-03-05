@@ -755,6 +755,13 @@ of the app. Beware that this comes at a CPU cost!",
         .help("Rerun client authentication setup wizard"),
     )
     .arg(
+      Arg::new("no-update")
+        .short('U')
+        .long("no-update")
+        .action(clap::ArgAction::SetTrue)
+        .help("Skip the automatic update check on startup"),
+    )
+    .arg(
       Arg::new("completions")
         .long("completions")
         .help("Generates completions for your preferred shell")
@@ -804,36 +811,6 @@ of the app. Beware that this comes at a CPU cost!",
 
   // Auto-update on launch: silently check, download, install, and restart.
   // Skip if a CLI subcommand is active or SPOTATUI_SKIP_UPDATE is set (prevents restart loops).
-  if matches.subcommand_name().is_none() && std::env::var_os("SPOTATUI_SKIP_UPDATE").is_none() {
-    println!("Checking for updates...");
-    // Must use spawn_blocking because self_update uses reqwest::blocking internally,
-    // which creates its own tokio runtime and panics if called from an async context.
-    let update_result = tokio::task::spawn_blocking(cli::install_update_silent)
-      .await
-      .ok()
-      .and_then(|r| r.ok())
-      .flatten();
-    if let Some(new_version) = update_result {
-      println!("Updated to v{}! Restarting...", new_version);
-      // Re-exec the current binary with the same args, skipping the update check
-      let exe = std::env::current_exe().expect("failed to get current executable path");
-      let args: Vec<String> = std::env::args().skip(1).collect();
-      let status = std::process::Command::new(&exe)
-        .args(&args)
-        .env("SPOTATUI_SKIP_UPDATE", "1")
-        .status();
-      match status {
-        Ok(exit_status) => std::process::exit(exit_status.code().unwrap_or(0)),
-        Err(e) => {
-          eprintln!("Failed to restart after update: {}", e);
-          eprintln!("Please restart spotatui manually.");
-          std::process::exit(1);
-        }
-      }
-    }
-    // Up-to-date or check failed — continue normally
-  }
-
   let mut user_config = UserConfig::new();
   if let Some(config_file_path) = matches.get_one::<String>("config") {
     let config_file_path = PathBuf::from(config_file_path);
@@ -842,6 +819,62 @@ of the app. Beware that this comes at a CPU cost!",
   }
   user_config.load_config()?;
   info!("user config loaded successfully");
+
+  if matches.subcommand_name().is_none()
+    && std::env::var_os("SPOTATUI_SKIP_UPDATE").is_none()
+    && !matches.get_flag("no-update")
+    && !user_config.behavior.disable_auto_update
+  {
+    println!("Checking for updates...");
+    // Must use spawn_blocking because self_update uses reqwest::blocking internally,
+    // which creates its own tokio runtime and panics if called from an async context.
+    let delay_secs = cli::parse_delay_secs(&user_config.behavior.auto_update_delay).unwrap_or(0);
+    let update_result = tokio::task::spawn_blocking(move || cli::install_update_silent(delay_secs))
+      .await
+      .ok()
+      .and_then(|r| r.ok());
+    match update_result {
+      Some(cli::UpdateOutcome::Installed(new_version)) => {
+        println!("Updated to v{}! Restarting...", new_version);
+        // Re-exec the current binary with the same args, skipping the update check
+        let exe = std::env::current_exe().expect("failed to get current executable path");
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let status = std::process::Command::new(&exe)
+          .args(&args)
+          .env("SPOTATUI_SKIP_UPDATE", "1")
+          .status();
+        match status {
+          Ok(exit_status) => std::process::exit(exit_status.code().unwrap_or(0)),
+          Err(e) => {
+            eprintln!("Failed to restart after update: {}", e);
+            eprintln!("Please restart spotatui manually.");
+            std::process::exit(1);
+          }
+        }
+      }
+      Some(cli::UpdateOutcome::Pending {
+        version,
+        secs_remaining,
+      }) => {
+        let human = if secs_remaining >= 86400 {
+          format!("{}d", secs_remaining / 86400)
+        } else if secs_remaining >= 3600 {
+          format!("{}h", secs_remaining / 3600)
+        } else if secs_remaining >= 60 {
+          format!("{}m", secs_remaining / 60)
+        } else {
+          format!("{}s", secs_remaining)
+        };
+        println!(
+          "Update v{} detected — will install in {}. Run `spotatui update --install` to update now.",
+          version, human
+        );
+      }
+      // Up-to-date, check failed, or no update — continue normally
+      _ => {}
+    }
+  }
+
   let initial_shuffle_enabled = user_config.behavior.shuffle_enabled;
   let initial_startup_behavior = user_config.behavior.startup_behavior;
 

@@ -2504,6 +2504,18 @@ impl App {
           value: SettingValue::Bool(self.user_config.behavior.enable_announcements),
         },
         SettingItem {
+          id: "behavior.disable_auto_update".to_string(),
+          name: "Disable Auto-Update".to_string(),
+          description: "Skip the automatic update check on startup. Use the 'spotatui update' command to update manually.".to_string(),
+          value: SettingValue::Bool(self.user_config.behavior.disable_auto_update),
+        },
+        SettingItem {
+          id: "behavior.auto_update_delay".to_string(),
+          name: "Auto-Update Delay".to_string(),
+          description: "How long to wait before installing an available update. Use '0' for immediate, or e.g. '10m', '2h', '7d'. Only applies when auto-update is enabled.".to_string(),
+          value: SettingValue::String(self.user_config.behavior.auto_update_delay.clone()),
+        },
+        SettingItem {
           id: "behavior.announcement_feed_url".to_string(),
           name: "Announcements Feed URL".to_string(),
           description: "Remote JSON feed URL (HTTPS)".to_string(),
@@ -2879,6 +2891,16 @@ impl App {
         "behavior.enable_announcements" => {
           if let SettingValue::Bool(v) = &setting.value {
             self.user_config.behavior.enable_announcements = *v;
+          }
+        }
+        "behavior.disable_auto_update" => {
+          if let SettingValue::Bool(v) = &setting.value {
+            self.user_config.behavior.disable_auto_update = *v;
+          }
+        }
+        "behavior.auto_update_delay" => {
+          if let SettingValue::String(v) = &setting.value {
+            self.user_config.behavior.auto_update_delay = v.clone();
           }
         }
         "behavior.announcement_feed_url" => {
