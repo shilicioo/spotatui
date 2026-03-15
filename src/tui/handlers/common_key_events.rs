@@ -67,6 +67,10 @@ pub fn on_high_press_handler() -> usize {
 }
 
 pub fn on_middle_press_handler<T>(selection_data: &[T]) -> usize {
+  if selection_data.is_empty() {
+    return 0;
+  }
+
   let mut index = selection_data.len() / 2;
   if selection_data.len().is_multiple_of(2) {
     index -= 1;
@@ -75,7 +79,7 @@ pub fn on_middle_press_handler<T>(selection_data: &[T]) -> usize {
 }
 
 pub fn on_low_press_handler<T>(selection_data: &[T]) -> usize {
-  selection_data.len() - 1
+  selection_data.len().saturating_sub(1)
 }
 
 pub fn handle_right_event(app: &mut App) {
@@ -183,5 +187,19 @@ mod tests {
     let index = 0;
     let next_index = on_up_press_handler(&data, Some(index));
     assert_eq!(next_index, data.len() - 1);
+  }
+
+  #[test]
+  fn test_on_middle_press_handler_empty() {
+    let data: Vec<&str> = vec![];
+    let next_index = on_middle_press_handler(&data);
+    assert_eq!(next_index, 0);
+  }
+
+  #[test]
+  fn test_on_low_press_handler_empty() {
+    let data: Vec<&str> = vec![];
+    let next_index = on_low_press_handler(&data);
+    assert_eq!(next_index, 0);
   }
 }

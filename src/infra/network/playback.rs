@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "streaming")]
 use librespot_connect::{LoadRequest, LoadRequestOptions, PlayingTrack};
 
+const MAX_API_PLAYBACK_URIS: usize = 100;
+
 pub trait PlaybackNetwork {
   async fn get_current_playback(&mut self);
   async fn start_playback(
@@ -38,8 +40,33 @@ pub trait PlaybackNetwork {
   #[allow(dead_code)]
   async fn add_item_to_queue(&mut self, item: PlayableId<'static>);
   async fn get_queue(&mut self);
-  #[allow(dead_code)]
-  async fn start_collection_playback(&mut self, offset: usize);
+}
+
+fn trim_api_playback_uris(
+  track_uris: Vec<PlayableId<'static>>,
+  offset: Option<usize>,
+) -> (Vec<PlayableId<'static>>, Option<usize>) {
+  if track_uris.len() <= MAX_API_PLAYBACK_URIS {
+    return (track_uris, offset);
+  }
+
+  let selected_index = offset.unwrap_or(0).min(track_uris.len().saturating_sub(1));
+  let preferred_history = MAX_API_PLAYBACK_URIS / 5;
+  let mut start = selected_index.saturating_sub(preferred_history);
+  let end = (start + MAX_API_PLAYBACK_URIS).min(track_uris.len());
+
+  if end - start < MAX_API_PLAYBACK_URIS {
+    start = end.saturating_sub(MAX_API_PLAYBACK_URIS);
+  }
+
+  // Spotify rejects oversized URI payloads, so URI-list playback is capped
+  // to a window that still contains the selected track.
+  let trimmed_uris = track_uris[start..end]
+    .iter()
+    .map(PlayableId::clone_static)
+    .collect::<Vec<_>>();
+
+  (trimmed_uris, Some(selected_index - start))
 }
 
 #[cfg(feature = "streaming")]
@@ -320,6 +347,18 @@ impl PlaybackNetwork for Network {
     uris: Option<Vec<PlayableId<'static>>>,
     offset: Option<usize>,
   ) {
+    let (uris, offset) = if context_id.is_none() {
+      match uris {
+        Some(track_uris) => {
+          let (trimmed_uris, trimmed_offset) = trim_api_playback_uris(track_uris, offset);
+          (Some(trimmed_uris), trimmed_offset)
+        }
+        None => (None, offset),
+      }
+    } else {
+      (uris, offset)
+    };
+
     let desired_shuffle_state = {
       let app = self.app.lock().await;
       app
@@ -845,12 +884,54 @@ impl PlaybackNetwork for Network {
       }
     }
   }
+}
 
-  async fn start_collection_playback(&mut self, _offset: usize) {
-    // Placeholder - Spotify API doesn't support "My Music" as context
-    let mut app = self.app.lock().await;
-    app.status_message =
-      Some("Starting playback from Liked Songs is not yet supported via API".to_string());
-    app.status_message_expires_at = Some(Instant::now() + Duration::from_secs(5));
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use rspotify::model::idtypes::TrackId;
+  use rspotify::prelude::Id;
+
+  fn playable_track(id: &str) -> PlayableId<'static> {
+    PlayableId::Track(TrackId::from_id(id).unwrap().into_static())
+  }
+
+  #[test]
+  fn trim_api_playback_uris_leaves_small_requests_unchanged() {
+    let uris = vec![
+      playable_track("0000000000000000000001"),
+      playable_track("0000000000000000000002"),
+    ];
+
+    let (trimmed, offset) = trim_api_playback_uris(uris.clone(), Some(1));
+
+    assert_eq!(trimmed, uris);
+    assert_eq!(offset, Some(1));
+  }
+
+  #[test]
+  fn trim_api_playback_uris_keeps_selected_track_inside_window() {
+    let uris = (0..150)
+      .map(|index| playable_track(&format!("{index:022}")))
+      .collect::<Vec<_>>();
+
+    let (trimmed, offset) = trim_api_playback_uris(uris.clone(), Some(60));
+
+    assert_eq!(trimmed.len(), MAX_API_PLAYBACK_URIS);
+    assert_eq!(offset, Some(20));
+    assert_eq!(trimmed[offset.unwrap()].uri(), uris[60].uri());
+  }
+
+  #[test]
+  fn trim_api_playback_uris_slides_window_near_end() {
+    let uris = (0..150)
+      .map(|index| playable_track(&format!("{index:022}")))
+      .collect::<Vec<_>>();
+
+    let (trimmed, offset) = trim_api_playback_uris(uris.clone(), Some(149));
+
+    assert_eq!(trimmed.len(), MAX_API_PLAYBACK_URIS);
+    assert_eq!(offset, Some(99));
+    assert_eq!(trimmed[offset.unwrap()].uri(), uris[149].uri());
   }
 }

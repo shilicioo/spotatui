@@ -43,9 +43,8 @@ pub fn handler(key: Key, app: &mut App) {
       }
       // Liked Songs,
       2 => {
+        app.reset_saved_tracks_view();
         app.dispatch(IoEvent::GetCurrentSavedTracks(None));
-        // Pre-fetch more pages in background for seamless playback
-        app.dispatch(IoEvent::PreFetchAllSavedTracks);
         app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
       }
       // Albums,

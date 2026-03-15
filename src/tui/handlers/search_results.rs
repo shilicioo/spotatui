@@ -326,8 +326,8 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
       ) {
         if let Some(playlist) = playlists_result.items.get(index) {
           // Go to playlist tracks table
-          app.track_table.context = Some(TrackTableContext::PlaylistSearch);
           let playlist_id = playlist.id.clone().into_static();
+          app.reset_playlist_tracks_view(playlist_id.clone(), TrackTableContext::PlaylistSearch);
           app.dispatch(IoEvent::GetPlaylistItems(playlist_id, app.playlist_offset));
         };
       }

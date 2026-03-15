@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Liked Songs playback/paging drift**: Fixed saved-track playback starting the wrong song, prevented rows from reordering while pages load, stabilized background prefetch around the current page, and made liked hearts render immediately when opening Liked Songs ([#139](https://github.com/LargeModGames/spotatui/issues/139)).
+- **Native playback resume after Enter**: Fixed native streaming loads that could update the playbar to `Playing` without actually resuming audio until play/pause was toggled again.
+- **Playlist paging duplication/reordering**: Fixed playlist tracks duplicating or shuffling while additional pages load by switching playlists to a stable offset-keyed page cache and bounded lookahead prefetch model.
+- **Sparse playlist page navigation**: Fixed playlist next/previous navigation so it now targets the logical adjacent page offset instead of jumping between whatever sparse cached pages happen to exist.
+- **Playlist table identity drift**: Fixed playlist sort/fetch actions so they target the currently open playlist table via `playlist_track_table_id` instead of stale sidebar selection state.
+
 ## [0.37.3] - 2026-03-06
 
 
@@ -1096,4 +1106,3 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-

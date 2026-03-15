@@ -104,14 +104,8 @@ fn apply_sort(app: &mut App, field: SortField) {
     // Actually sort the data
     match ctx {
       SortContext::PlaylistTracks => {
-        // For playlists, dispatch network event to fetch all tracks and sort
-        // Get the current playlist ID
-        if let Some(active_playlist_index) = app.active_playlist_index {
-          if let Some(playlist) = app.all_playlists.get(active_playlist_index) {
-            let playlist_id = playlist.id.clone().into_static();
-            app
-              .dispatch(crate::infra::network::IoEvent::FetchAllPlaylistTracksAndSort(playlist_id));
-          }
+        if let Some(playlist_id) = app.current_playlist_track_table_id() {
+          app.dispatch(crate::infra::network::IoEvent::FetchAllPlaylistTracksAndSort(playlist_id));
         }
       }
       SortContext::SavedAlbums => sort_saved_albums(app),
@@ -209,4 +203,68 @@ fn sort_saved_artists(app: &mut App) {
       cmp
     }
   });
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::core::app::TrackTableContext;
+  use crate::core::user_config::UserConfig;
+  use crate::infra::network::IoEvent;
+  use rspotify::model::{
+    idtypes::{PlaylistId, UserId},
+    playlist::PlaylistTracksRef,
+    SimplifiedPlaylist,
+  };
+  use rspotify::prelude::Id;
+  use std::collections::HashMap;
+  use std::sync::mpsc::channel;
+  use std::time::SystemTime;
+
+  fn test_playlist(id: &str, name: &str) -> SimplifiedPlaylist {
+    SimplifiedPlaylist {
+      collaborative: false,
+      external_urls: HashMap::new(),
+      href: format!("https://api.spotify.com/v1/playlists/{id}"),
+      id: PlaylistId::from_id(id).unwrap().into_static(),
+      images: Vec::new(),
+      name: name.to_string(),
+      owner: rspotify::model::PublicUser {
+        display_name: Some("tester".to_string()),
+        external_urls: HashMap::new(),
+        followers: None,
+        href: "https://api.spotify.com/v1/users/spotatui-test-user".to_string(),
+        id: UserId::from_id("spotatui-test-user").unwrap().into_static(),
+        images: Vec::new(),
+      },
+      public: Some(false),
+      snapshot_id: "snapshot".to_string(),
+      tracks: PlaylistTracksRef {
+        href: "https://example.com/playlist/tracks".to_string(),
+        total: 2,
+      },
+    }
+  }
+
+  #[test]
+  fn playlist_sort_dispatches_for_current_playlist_table_id() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    let sidebar_playlist = test_playlist("37i9dQZF1DXcBWIGoYBM5M", "Sidebar Playlist");
+    let search_playlist = test_playlist("37i9dQZF1DX4WYpdgoIcn6", "Search Playlist");
+    app.all_playlists = vec![sidebar_playlist];
+    app.active_playlist_index = Some(0);
+    app.track_table.context = Some(TrackTableContext::PlaylistSearch);
+    app.playlist_track_table_id = Some(search_playlist.id.clone());
+    app.sort_context = Some(SortContext::PlaylistTracks);
+
+    apply_sort(&mut app, SortField::Name);
+
+    match rx.recv().unwrap() {
+      IoEvent::FetchAllPlaylistTracksAndSort(playlist_id) => {
+        assert_eq!(playlist_id.id(), search_playlist.id.id());
+      }
+      _ => panic!("expected playlist sort fetch"),
+    }
+  }
 }

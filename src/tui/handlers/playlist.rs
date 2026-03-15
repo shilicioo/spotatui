@@ -56,15 +56,12 @@ pub fn handler(key: Key, app: &mut App) {
               // Open the playlist tracks
               if let Some(playlist) = app.all_playlists.get(*index) {
                 app.active_playlist_index = Some(*index);
-                app.track_table.context = Some(TrackTableContext::MyPlaylists);
-                app.playlist_offset = 0;
                 let playlist_id = playlist.id.clone().into_static();
+                app.reset_playlist_tracks_view(playlist_id.clone(), TrackTableContext::MyPlaylists);
                 app.dispatch(IoEvent::GetPlaylistItems(
                   playlist_id.clone(),
                   app.playlist_offset,
                 ));
-                // Pre-fetch more pages in background for seamless playback
-                app.dispatch(IoEvent::PreFetchAllPlaylistTracks(playlist_id));
               }
             }
           }
@@ -95,6 +92,60 @@ pub fn handler(key: Key, app: &mut App) {
 
 #[cfg(test)]
 mod tests {
+  use super::*;
+  use crate::core::user_config::UserConfig;
+  use rspotify::model::{
+    idtypes::{PlaylistId, UserId},
+    playlist::PlaylistTracksRef,
+    SimplifiedPlaylist,
+  };
+  use std::collections::HashMap;
+  use std::sync::mpsc::channel;
+  use std::time::SystemTime;
+
+  fn test_playlist(id: &str, name: &str) -> SimplifiedPlaylist {
+    SimplifiedPlaylist {
+      collaborative: false,
+      external_urls: HashMap::new(),
+      href: format!("https://api.spotify.com/v1/playlists/{id}"),
+      id: PlaylistId::from_id(id).unwrap().into_static(),
+      images: Vec::new(),
+      name: name.to_string(),
+      owner: rspotify::model::PublicUser {
+        display_name: Some("tester".to_string()),
+        external_urls: HashMap::new(),
+        followers: None,
+        href: "https://api.spotify.com/v1/users/spotatui-test-user".to_string(),
+        id: UserId::from_id("spotatui-test-user").unwrap().into_static(),
+        images: Vec::new(),
+      },
+      public: Some(false),
+      snapshot_id: "snapshot".to_string(),
+      tracks: PlaylistTracksRef {
+        href: "https://example.com/playlist/tracks".to_string(),
+        total: 2,
+      },
+    }
+  }
+
   #[test]
-  fn test() {}
+  fn enter_playlist_dispatches_only_visible_page_load() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    app.all_playlists = vec![test_playlist("37i9dQZF1DXcBWIGoYBM5M", "Test Playlist")];
+    app.playlist_folder_items = vec![PlaylistFolderItem::Playlist {
+      index: 0,
+      current_id: 0,
+    }];
+    app.selected_playlist_index = Some(0);
+
+    handler(Key::Enter, &mut app);
+
+    match rx.recv().unwrap() {
+      IoEvent::GetPlaylistItems(_, 0) => {}
+      _ => panic!("expected playlist page fetch"),
+    }
+
+    assert!(rx.try_recv().is_err());
+  }
 }

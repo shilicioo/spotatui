@@ -50,7 +50,6 @@ pub enum IoEvent {
   GetPlaylists,
   GetDevices,
   GetSearchResults(String, Option<Country>),
-  SetTracksToTable(Vec<FullTrack>),
   GetPlaylistItems(PlaylistId<'static>, u32),
   GetCurrentSavedTracks(Option<u32>),
   StartPlayback(
@@ -111,16 +110,17 @@ pub enum IoEvent {
   FetchGlobalSongCount,
   FetchAnnouncements,
   GetLyrics(String, String, f64),
-  /// Start playback from the user's saved tracks collection (Liked Songs)
-  /// Takes the absolute position in the collection to start from
-  /// NOTE: Currently unused - Spotify Web API doesn't support collection context URI
-  /// Keeping for potential future use if Spotify adds support
-  #[allow(dead_code)]
-  StartCollectionPlayback(usize),
-  /// Pre-fetch all saved tracks pages in background for seamless playback
-  PreFetchAllSavedTracks,
-  /// Pre-fetch all tracks from a playlist in background
-  PreFetchAllPlaylistTracks(PlaylistId<'static>),
+  /// Pre-fetch the next saved tracks page in background for smoother page transitions
+  PreFetchSavedTracksPage {
+    offset: u32,
+    generation: u64,
+  },
+  /// Pre-fetch the next playlist page in background for smoother page transitions
+  PreFetchPlaylistTracksPage {
+    playlist_id: PlaylistId<'static>,
+    offset: u32,
+    generation: u64,
+  },
   /// Get user's top tracks for Discover feature (with time range)
   GetUserTopTracks(crate::core::app::DiscoverTimeRange),
   /// Get Top Artists Mix - fetches top artists and their top tracks
@@ -214,9 +214,6 @@ impl Network {
       }
       IoEvent::GetCurrentPlayback => {
         self.get_current_playback().await;
-      }
-      IoEvent::SetTracksToTable(full_tracks) => {
-        self.set_tracks_to_table(full_tracks).await;
       }
       IoEvent::GetSearchResults(search_term, country) => {
         self.get_search_results(search_term, country).await;
@@ -386,27 +383,15 @@ impl Network {
       IoEvent::GetLyrics(track, artist, duration) => {
         self.get_lyrics(track, artist, duration).await;
       }
-      IoEvent::StartCollectionPlayback(offset) => {
-        self.start_collection_playback(offset).await;
+      IoEvent::PreFetchSavedTracksPage { offset, generation } => {
+        self.spawn_saved_tracks_prefetch(offset, generation);
       }
-      IoEvent::PreFetchAllSavedTracks => {
-        // Spawn prefetch as a separate task to avoid blocking playback
-        let spotify = self.spotify.clone();
-        let app = self.app.clone();
-        let large_search_limit = self.large_search_limit;
-        tokio::spawn(async move {
-          library::prefetch_all_saved_tracks_task(spotify, app, large_search_limit).await;
-        });
-      }
-      IoEvent::PreFetchAllPlaylistTracks(playlist_id) => {
-        // Spawn prefetch as a separate task to avoid blocking playback
-        let spotify = self.spotify.clone();
-        let app = self.app.clone();
-        let large_search_limit = self.large_search_limit;
-        tokio::spawn(async move {
-          library::prefetch_all_playlist_tracks_task(spotify, app, large_search_limit, playlist_id)
-            .await;
-        });
+      IoEvent::PreFetchPlaylistTracksPage {
+        playlist_id,
+        offset,
+        generation,
+      } => {
+        self.spawn_playlist_tracks_prefetch(playlist_id, offset, generation);
       }
       IoEvent::GetUserTopTracks(time_range) => {
         self.get_user_top_tracks(time_range).await;

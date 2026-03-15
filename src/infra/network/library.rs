@@ -2,7 +2,7 @@ use super::requests::{spotify_api_request_json_for, spotify_get_typed_compat_for
 use super::Network;
 use crate::core::app::{
   ActiveBlock, App, PlaylistFolder, PlaylistFolderItem, PlaylistFolderNode, PlaylistFolderNodeType,
-  RouteId, TrackTableContext,
+  RouteId,
 };
 use anyhow::anyhow;
 use reqwest::Method;
@@ -10,7 +10,7 @@ use rspotify::model::{
   idtypes::{AlbumId, PlaylistId, ShowId, TrackId, UserId},
   page::Page,
   playlist::PlaylistItem,
-  track::FullTrack,
+  track::SavedTrack,
   PlayableItem,
 };
 use rspotify::{prelude::*, AuthCodePkceSpotify};
@@ -22,109 +22,114 @@ use tokio::sync::Mutex;
 #[cfg(feature = "streaming")]
 use crate::infra::player::StreamingPlayer;
 
-pub async fn prefetch_all_saved_tracks_task(
-  spotify: AuthCodePkceSpotify,
-  app: Arc<Mutex<App>>,
-  limit: u32,
+const LIBRARY_CONTAINS_MAX_URIS: usize = 50;
+
+#[cfg(test)]
+fn next_saved_tracks_offset(page: &Page<SavedTrack>) -> Option<u32> {
+  page.next.as_ref().map(|_| page.offset + page.limit)
+}
+
+fn uri_batches(uris: &[String]) -> impl Iterator<Item = &[String]> {
+  uris.chunks(LIBRARY_CONTAINS_MAX_URIS)
+}
+
+fn populate_liked_song_ids_from_saved_tracks(
+  liked_song_ids_set: &mut std::collections::HashSet<String>,
+  page: &Page<SavedTrack>,
 ) {
-  let mut offset = 0u32;
-  loop {
-    // Check if stopped
-    {
-      let app = app.lock().await;
-      if !app.is_loading {
-        // Simple heuristic: if loading stopped globally, maybe stop prefetch?
-        // Actually we want prefetch to run in background.
-        // But we should check if user quit.
-      }
-    }
-
-    let query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
-    match spotify_get_typed_compat_for::<Page<rspotify::model::SavedTrack>>(
-      &spotify,
-      "me/tracks",
-      &query,
-    )
-    .await
-    {
-      Ok(page) => {
-        if page.items.is_empty() {
-          break;
-        }
-
-        let mut app_guard = app.lock().await;
-        app_guard.library.saved_tracks.add_pages(page.clone());
-
-        // Also update track table if we are currently viewing saved tracks
-        if let Some(TrackTableContext::SavedTracks) = app_guard.track_table.context {
-          // Append to track table
-          let new_tracks: Vec<FullTrack> = page.items.into_iter().map(|item| item.track).collect();
-          app_guard.track_table.tracks.extend(new_tracks);
-        }
-
-        if page.next.is_none() {
-          break;
-        }
-        offset += limit;
-      }
-      Err(_) => break,
+  for item in &page.items {
+    if let Some(track_id) = &item.track.id {
+      liked_song_ids_set.insert(track_id.id().to_string());
     }
   }
 }
 
-pub async fn prefetch_all_playlist_tracks_task(
+pub async fn prefetch_saved_tracks_page_task(
+  spotify: AuthCodePkceSpotify,
+  app: Arc<Mutex<App>>,
+  limit: u32,
+  offset: u32,
+  generation: u64,
+) {
+  let should_fetch = {
+    let app = app.lock().await;
+    app.saved_tracks_prefetch_generation == generation
+      && app
+        .library
+        .saved_tracks
+        .page_index_for_offset(offset)
+        .is_none()
+  };
+
+  if !should_fetch {
+    return;
+  }
+
+  let query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
+  let Ok(page) = spotify_get_typed_compat_for::<Page<rspotify::model::SavedTrack>>(
+    &spotify,
+    "me/tracks",
+    &query,
+  )
+  .await
+  else {
+    return;
+  };
+
+  if page.items.is_empty() {
+    return;
+  }
+
+  let mut app_guard = app.lock().await;
+  if app_guard.saved_tracks_prefetch_generation != generation {
+    return;
+  }
+
+  populate_liked_song_ids_from_saved_tracks(&mut app_guard.liked_song_ids_set, &page);
+  app_guard.library.saved_tracks.upsert_page_by_offset(page);
+}
+
+pub async fn prefetch_playlist_tracks_page_task(
   spotify: AuthCodePkceSpotify,
   app: Arc<Mutex<App>>,
   limit: u32,
   playlist_id: PlaylistId<'static>,
+  offset: u32,
+  generation: u64,
 ) {
-  let mut offset = 0u32;
-  let path = format!("playlists/{}/items", playlist_id.id());
+  let should_fetch = {
+    let app = app.lock().await;
+    app.playlist_tracks_prefetch_generation == generation
+      && app.is_playlist_track_table_active_for(&playlist_id)
+      && app
+        .playlist_track_pages
+        .page_index_for_offset(offset)
+        .is_none()
+  };
 
-  loop {
-    let query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
-    match spotify_get_typed_compat_for::<Page<PlaylistItem>>(&spotify, &path, &query).await {
-      Ok(page) => {
-        if page.items.is_empty() {
-          break;
-        }
-
-        let mut tracks: Vec<FullTrack> = Vec::new();
-        for item in &page.items {
-          if let Some(PlayableItem::Track(full_track)) = item.track.as_ref() {
-            tracks.push(full_track.clone());
-          }
-        }
-
-        let mut app_guard = app.lock().await;
-        // append to playlist_tracks if needed or cache
-        // For now, we update the app state directly if this is the active playlist
-        // But we don't have a check for "active playlist ID".
-        // We just update the track table if context matches.
-
-        // NOTE: The original implementation logic was complex here.
-        // For this refactor, we just fetch and maybe store in a cache if we had one.
-        // Since `playlist_tracks` in App is a single Page, it doesn't support full prefetch well yet.
-        // We will just break loop for now to avoid logic error, effectively disabling full prefetch until feature is fully implemented.
-        // The user asked to split files, not fix logic bugs, but I should try to preserve behavior.
-
-        // Assuming we just want to load them into the track table:
-        if let Some(positions) = &mut app_guard.playlist_track_positions {
-          // Append
-          let start = positions.len();
-          let count = tracks.len();
-          positions.extend(start..start + count);
-        }
-        app_guard.track_table.tracks.extend(tracks);
-
-        if page.next.is_none() {
-          break;
-        }
-        offset += limit;
-      }
-      Err(_) => break,
-    }
+  if !should_fetch {
+    return;
   }
+
+  let path = format!("playlists/{}/items", playlist_id.id());
+  let query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
+  let Ok(page) = spotify_get_typed_compat_for::<Page<PlaylistItem>>(&spotify, &path, &query).await
+  else {
+    return;
+  };
+
+  if page.items.is_empty() {
+    return;
+  }
+
+  let mut app_guard = app.lock().await;
+  if app_guard.playlist_tracks_prefetch_generation != generation
+    || !app_guard.is_playlist_track_table_active_for(&playlist_id)
+  {
+    return;
+  }
+
+  app_guard.playlist_track_pages.upsert_page_by_offset(page);
 }
 
 pub trait LibraryNetwork {
@@ -164,9 +169,6 @@ pub trait LibraryNetwork {
   async fn toggle_save_track(&mut self, track_id: rspotify::model::idtypes::PlayableId<'static>);
   async fn current_user_saved_tracks_contains(&mut self, ids: Vec<TrackId<'static>>);
   async fn fetch_all_playlist_tracks_and_sort(&mut self, playlist_id: PlaylistId<'static>);
-
-  // Helpers exposed via trait if needed, or kept private if only used internally
-  async fn set_tracks_to_table(&mut self, tracks: Vec<FullTrack>);
 }
 
 // Private helper methods
@@ -176,12 +178,18 @@ impl Network {
       return Ok(Vec::new());
     }
 
-    spotify_get_typed_compat_for(
-      &self.spotify,
-      "me/library/contains",
-      &[("uris", uris.join(","))],
-    )
-    .await
+    let mut all_results = Vec::with_capacity(uris.len());
+    for batch in uri_batches(uris) {
+      let batch_results = spotify_get_typed_compat_for::<Vec<bool>>(
+        &self.spotify,
+        "me/library/contains",
+        &[("uris", batch.join(","))],
+      )
+      .await?;
+      all_results.extend(batch_results);
+    }
+
+    Ok(all_results)
   }
 
   async fn library_save_uris(&self, uris: &[String]) -> anyhow::Result<()> {
@@ -218,21 +226,35 @@ impl Network {
     Ok(())
   }
 
-  async fn set_playlist_tracks_to_table(&mut self, playlist_track_page: &Page<PlaylistItem>) {
-    let mut tracks: Vec<FullTrack> = Vec::new();
-    let mut positions: Vec<usize> = Vec::new();
+  pub fn spawn_saved_tracks_prefetch(&self, offset: u32, generation: u64) {
+    let spotify = self.spotify.clone();
+    let app = self.app.clone();
+    let large_search_limit = self.large_search_limit;
+    tokio::spawn(async move {
+      prefetch_saved_tracks_page_task(spotify, app, large_search_limit, offset, generation).await;
+    });
+  }
 
-    for (idx, item) in playlist_track_page.items.iter().enumerate() {
-      if let Some(PlayableItem::Track(full_track)) = item.track.as_ref() {
-        tracks.push(full_track.clone());
-        positions.push(playlist_track_page.offset as usize + idx);
-      }
-    }
-
-    self.set_tracks_to_table(tracks).await;
-
-    let mut app = self.app.lock().await;
-    app.playlist_track_positions = Some(positions);
+  pub fn spawn_playlist_tracks_prefetch(
+    &self,
+    playlist_id: PlaylistId<'static>,
+    offset: u32,
+    generation: u64,
+  ) {
+    let spotify = self.spotify.clone();
+    let app = self.app.clone();
+    let large_search_limit = self.large_search_limit;
+    tokio::spawn(async move {
+      prefetch_playlist_tracks_page_task(
+        spotify,
+        app,
+        large_search_limit,
+        playlist_id,
+        offset,
+        generation,
+      )
+      .await;
+    });
   }
 }
 
@@ -307,6 +329,11 @@ impl LibraryNetwork for Network {
   }
 
   async fn get_playlist_tracks(&mut self, playlist_id: PlaylistId<'static>, playlist_offset: u32) {
+    let generation = {
+      let app = self.app.lock().await;
+      app.playlist_tracks_prefetch_generation
+    };
+
     let path = format!("playlists/{}/items", playlist_id.id());
     match spotify_get_typed_compat_for::<Page<PlaylistItem>>(
       &self.spotify,
@@ -319,11 +346,26 @@ impl LibraryNetwork for Network {
     .await
     {
       Ok(playlist_tracks) => {
-        self.set_playlist_tracks_to_table(&playlist_tracks).await;
-
         let mut app = self.app.lock().await;
-        app.playlist_tracks = Some(playlist_tracks);
+        if app.playlist_tracks_prefetch_generation != generation
+          || !app.is_playlist_track_table_active_for(&playlist_id)
+        {
+          return;
+        }
+
+        let playlist_tracks_index = app
+          .playlist_track_pages
+          .upsert_page_by_offset(playlist_tracks);
+        app.show_playlist_tracks_page_at_index(playlist_tracks_index);
+
+        let next_offset = app.next_missing_playlist_tracks_offset(playlist_tracks_index);
+        let generation = app.playlist_tracks_prefetch_generation;
         app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+        drop(app);
+
+        if let Some(next_offset) = next_offset {
+          self.spawn_playlist_tracks_prefetch(playlist_id, next_offset, generation);
+        }
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -332,6 +374,11 @@ impl LibraryNetwork for Network {
   }
 
   async fn get_current_user_saved_tracks(&mut self, offset: Option<u32>) {
+    let generation = {
+      let app = self.app.lock().await;
+      app.saved_tracks_prefetch_generation
+    };
+
     let mut query = vec![("limit", self.large_search_limit.to_string())];
     if let Some(offset) = offset {
       query.push(("offset", offset.to_string()));
@@ -346,32 +393,21 @@ impl LibraryNetwork for Network {
     {
       Ok(saved_tracks) => {
         let mut app = self.app.lock().await;
-        app.track_table.tracks = saved_tracks
-          .items
-          .clone()
-          .into_iter()
-          .map(|item| item.track)
-          .collect::<Vec<FullTrack>>();
-
-        saved_tracks.items.iter().for_each(|item| {
-          if let Some(track_id) = &item.track.id {
-            app.liked_song_ids_set.insert(track_id.to_string());
-          }
-        });
-
-        // Apply pending selection if set
-        let track_count = app.track_table.tracks.len();
-        if track_count > 0 {
-          if let Some(pending) = app.pending_track_table_selection.take() {
-            app.track_table.selected_index = match pending {
-              crate::core::app::PendingTrackSelection::First => 0,
-              crate::core::app::PendingTrackSelection::Last => track_count.saturating_sub(1),
-            };
-          }
+        if app.saved_tracks_prefetch_generation != generation {
+          return;
         }
 
-        app.library.saved_tracks.add_pages(saved_tracks);
-        app.track_table.context = Some(TrackTableContext::SavedTracks);
+        populate_liked_song_ids_from_saved_tracks(&mut app.liked_song_ids_set, &saved_tracks);
+        let saved_tracks_index = app.library.saved_tracks.upsert_page_by_offset(saved_tracks);
+        app.show_saved_tracks_page_at_index(saved_tracks_index);
+
+        let next_offset = app.next_missing_saved_tracks_offset(saved_tracks_index);
+        let generation = app.saved_tracks_prefetch_generation;
+        drop(app);
+
+        if let Some(next_offset) = next_offset {
+          self.spawn_saved_tracks_prefetch(next_offset, generation);
+        }
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -663,39 +699,6 @@ impl LibraryNetwork for Network {
     }
   }
 
-  async fn set_tracks_to_table(&mut self, tracks: Vec<FullTrack>) {
-    let track_ids: Vec<TrackId<'static>> = tracks
-      .iter()
-      .filter_map(|item| item.id.as_ref().map(|id| id.clone().into_static()))
-      .collect();
-
-    let mut app = self.app.lock().await;
-    app.playlist_track_positions = None;
-
-    let track_count = tracks.len();
-    if track_count > 0 {
-      if let Some(pending) = app.pending_track_table_selection.take() {
-        app.track_table.selected_index = match pending {
-          crate::core::app::PendingTrackSelection::First => 0,
-          crate::core::app::PendingTrackSelection::Last => track_count.saturating_sub(1),
-        };
-      } else {
-        let max_index = track_count.saturating_sub(1);
-        if app.track_table.selected_index > max_index {
-          app.track_table.selected_index = max_index;
-        }
-      }
-    } else {
-      app.track_table.selected_index = 0;
-    }
-
-    app.track_table.tracks = tracks;
-
-    drop(app); // Release lock
-               // Dispatch event to check saved status
-    self.current_user_saved_tracks_contains(track_ids).await;
-  }
-
   async fn fetch_all_playlist_tracks_and_sort(&mut self, playlist_id: PlaylistId<'static>) {
     let mut all_tracks = Vec::new();
     let mut offset = 0u32;
@@ -731,16 +734,109 @@ impl LibraryNetwork for Network {
     // Apply sort if any
     let mut app = self.app.lock().await;
 
-    // Sort
-    use crate::core::sort::{SortContext, Sorter};
-    if let Some(SortContext::PlaylistTracks) = app.sort_context {
-      let sorter = Sorter::new(app.playlist_sort);
-      sorter.sort_tracks(&mut all_tracks);
-    }
+    use crate::core::sort::Sorter;
+    let sorter = Sorter::new(app.playlist_sort);
+    sorter.sort_tracks(&mut all_tracks);
+    let _ = app.apply_sorted_playlist_tracks_if_current(&playlist_id, all_tracks);
+  }
+}
 
-    app.track_table.tracks = all_tracks;
-    // Reset selection
-    app.track_table.selected_index = 0;
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use chrono::{Duration as ChronoDuration, Utc};
+  use rspotify::model::{artist::SimplifiedArtist, track::FullTrack};
+  use std::collections::{HashMap, HashSet};
+
+  fn full_track(id: &str) -> FullTrack {
+    FullTrack {
+      album: rspotify::model::album::SimplifiedAlbum {
+        name: "Album".to_string(),
+        ..Default::default()
+      },
+      artists: vec![SimplifiedArtist {
+        name: "Artist".to_string(),
+        ..Default::default()
+      }],
+      available_markets: Vec::new(),
+      disc_number: 1,
+      duration: ChronoDuration::milliseconds(180_000),
+      explicit: false,
+      external_ids: HashMap::new(),
+      external_urls: HashMap::new(),
+      href: None,
+      id: Some(TrackId::from_id(id).unwrap().into_static()),
+      is_local: false,
+      is_playable: Some(true),
+      linked_from: None,
+      restrictions: None,
+      name: format!("Track {id}"),
+      popularity: 50,
+      preview_url: None,
+      track_number: 1,
+    }
+  }
+
+  fn saved_track(id: &str) -> SavedTrack {
+    SavedTrack {
+      added_at: Utc::now(),
+      track: full_track(id),
+    }
+  }
+
+  fn saved_tracks_page(offset: u32, limit: u32, has_next: bool) -> Page<SavedTrack> {
+    let ids = match offset {
+      0 => vec!["0000000000000000000001", "0000000000000000000002"],
+      20 => vec!["0000000000000000000003", "0000000000000000000004"],
+      40 => vec!["0000000000000000000005", "0000000000000000000006"],
+      _ => vec!["0000000000000000000007", "0000000000000000000008"],
+    };
+
+    Page {
+      href: "https://example.com/me/tracks".to_string(),
+      items: ids.into_iter().map(saved_track).collect(),
+      limit,
+      next: has_next.then(|| "https://example.com/me/tracks?next".to_string()),
+      offset,
+      previous: None,
+      total: 60,
+    }
+  }
+
+  #[test]
+  fn next_saved_tracks_offset_uses_page_limit() {
+    let page = saved_tracks_page(20, 20, true);
+    assert_eq!(next_saved_tracks_offset(&page), Some(40));
+  }
+
+  #[test]
+  fn next_saved_tracks_offset_returns_none_without_next_link() {
+    let page = saved_tracks_page(20, 20, false);
+    assert_eq!(next_saved_tracks_offset(&page), None);
+  }
+
+  #[test]
+  fn uri_batches_split_large_contains_requests() {
+    let uris = (0..120)
+      .map(|index| format!("spotify:track:{index:022}"))
+      .collect::<Vec<_>>();
+    let batches = uri_batches(&uris)
+      .map(|batch| batch.len())
+      .collect::<Vec<_>>();
+
+    assert_eq!(batches, vec![50, 50, 20]);
+  }
+
+  #[test]
+  fn populate_liked_song_ids_from_saved_tracks_uses_raw_track_ids() {
+    let page = saved_tracks_page(0, 20, false);
+    let mut liked_song_ids_set = HashSet::new();
+
+    populate_liked_song_ids_from_saved_tracks(&mut liked_song_ids_set, &page);
+
+    assert!(liked_song_ids_set.contains("0000000000000000000001"));
+    assert!(liked_song_ids_set.contains("0000000000000000000002"));
+    assert!(!liked_song_ids_set.contains("spotify:track:0000000000000000000001"));
   }
 }
 

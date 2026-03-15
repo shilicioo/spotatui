@@ -77,10 +77,55 @@ impl<T> ScrollableResultPages<T> {
     self.pages.get_mut(at_index.unwrap_or(self.index))
   }
 
+  pub fn clear(&mut self) {
+    self.index = 0;
+    self.pages.clear();
+  }
+
   pub fn add_pages(&mut self, new_pages: T) {
     self.pages.push(new_pages);
     // Whenever a new page is added, set the active index to the end of the vector
     self.index = self.pages.len() - 1;
+  }
+}
+
+// Offset-keyed page caches are always kept sorted by page.offset, but the cache can be sparse.
+// Visible-page identity must be derived from page.offset, not raw cache index adjacency.
+impl<T> ScrollableResultPages<Page<T>> {
+  pub fn page_index_for_offset(&self, offset: u32) -> Option<usize> {
+    self
+      .pages
+      .binary_search_by_key(&offset, |page| page.offset)
+      .ok()
+  }
+
+  pub fn upsert_page_by_offset(&mut self, new_page: Page<T>) -> usize {
+    let active_page_offset = self.pages.get(self.index).map(|page| page.offset);
+    let new_page_offset = new_page.offset;
+
+    match self
+      .pages
+      .binary_search_by_key(&new_page.offset, |page| page.offset)
+    {
+      Ok(index) => {
+        self.pages[index] = new_page;
+      }
+      Err(index) => {
+        self.pages.insert(index, new_page);
+      }
+    };
+
+    if let Some(active_page_offset) = active_page_offset {
+      if let Some(active_page_index) = self.page_index_for_offset(active_page_offset) {
+        self.index = active_page_index;
+      }
+    } else if !self.pages.is_empty() {
+      self.index = 0;
+    }
+
+    self
+      .page_index_for_offset(new_page_offset)
+      .expect("upserted page offset must exist in cache")
   }
 }
 
@@ -585,6 +630,8 @@ pub struct App {
   pub library: Library,
   pub playlist_offset: u32,
   pub playlist_tracks: Option<Page<PlaylistItem>>,
+  pub playlist_track_pages: ScrollableResultPages<Page<PlaylistItem>>,
+  pub playlist_track_table_id: Option<PlaylistId<'static>>,
   pub playlists: Option<Page<SimplifiedPlaylist>>,
   pub recently_played: SpotifyResultAndSelectedIndex<Option<CursorBasedPage<PlayHistory>>>,
   pub recommendations_seed: String,
@@ -725,6 +772,10 @@ pub struct App {
   pub current_playlist_folder_id: usize,
   /// Incremented every time playlists are refreshed to guard stale background tasks
   pub _playlist_refresh_generation: u64,
+  /// Incremented every time the saved tracks view is reloaded to guard stale prefetch tasks
+  pub saved_tracks_prefetch_generation: u64,
+  /// Incremented every time the playlist track table is reloaded to guard stale prefetch tasks
+  pub playlist_tracks_prefetch_generation: u64,
   /// Reference to the native streaming player for direct control (bypasses event channel)
   #[cfg(feature = "streaming")]
   pub streaming_player: Option<Arc<crate::player::StreamingPlayer>>,
@@ -791,6 +842,8 @@ impl Default for App {
       input_scroll_offset: Cell::new(0),
       playlist_offset: 0,
       playlist_tracks: None,
+      playlist_track_pages: ScrollableResultPages::new(),
+      playlist_track_table_id: None,
       playlists: None,
       recommendations_context: None,
       recommendations_seed: "".to_string(),
@@ -887,6 +940,8 @@ impl Default for App {
       playlist_folder_items: Vec::new(),
       current_playlist_folder_id: 0,
       _playlist_refresh_generation: 0,
+      saved_tracks_prefetch_generation: 0,
+      playlist_tracks_prefetch_generation: 0,
       #[cfg(feature = "streaming")]
       streaming_player: None,
       #[cfg(all(feature = "mpris", target_os = "linux"))]
@@ -1914,14 +1969,195 @@ impl App {
   }
 
   pub fn set_saved_tracks_to_table(&mut self, saved_track_page: &Page<SavedTrack>) {
-    self.dispatch(IoEvent::SetTracksToTable(
+    self.replace_track_table_tracks(
       saved_track_page
         .items
-        .clone()
-        .into_iter()
-        .map(|item| item.track)
+        .iter()
+        .map(|item| item.track.clone())
         .collect::<Vec<FullTrack>>(),
-    ));
+    );
+    self.track_table.context = Some(TrackTableContext::SavedTracks);
+  }
+
+  pub fn set_playlist_tracks_to_table(&mut self, playlist_track_page: &Page<PlaylistItem>) {
+    let mut tracks: Vec<FullTrack> = Vec::new();
+    let mut track_ids: Vec<TrackId<'static>> = Vec::new();
+    let mut positions: Vec<usize> = Vec::new();
+
+    for (idx, item) in playlist_track_page.items.iter().enumerate() {
+      if let Some(PlayableItem::Track(full_track)) = item.track.as_ref() {
+        tracks.push(full_track.clone());
+        if let Some(track_id) = full_track.id.as_ref() {
+          track_ids.push(track_id.clone().into_static());
+        }
+        positions.push(playlist_track_page.offset as usize + idx);
+      }
+    }
+
+    self.replace_track_table_tracks(tracks);
+    self.playlist_track_positions = Some(positions);
+    self.dispatch(IoEvent::CurrentUserSavedTracksContains(track_ids));
+  }
+
+  pub fn reset_saved_tracks_view(&mut self) {
+    self.saved_tracks_prefetch_generation = self.saved_tracks_prefetch_generation.wrapping_add(1);
+    self.library.saved_tracks.clear();
+    self.pending_track_table_selection = None;
+    self.track_table.selected_index = 0;
+    self.track_table.tracks.clear();
+    self.track_table.context = Some(TrackTableContext::SavedTracks);
+  }
+
+  pub fn reset_playlist_tracks_view(
+    &mut self,
+    playlist_id: PlaylistId<'static>,
+    context: TrackTableContext,
+  ) {
+    self.playlist_tracks_prefetch_generation =
+      self.playlist_tracks_prefetch_generation.wrapping_add(1);
+    self.playlist_track_table_id = Some(playlist_id);
+    self.playlist_track_pages.clear();
+    self.playlist_tracks = None;
+    self.playlist_offset = 0;
+    self.pending_track_table_selection = None;
+    self.track_table.selected_index = 0;
+    self.track_table.tracks.clear();
+    self.track_table.context = Some(context);
+    self.playlist_track_positions = None;
+  }
+
+  pub fn replace_track_table_tracks(&mut self, tracks: Vec<FullTrack>) {
+    self.playlist_track_positions = None;
+
+    let track_count = tracks.len();
+    if track_count > 0 {
+      if let Some(pending) = self.pending_track_table_selection.take() {
+        self.track_table.selected_index = match pending {
+          PendingTrackSelection::First => 0,
+          PendingTrackSelection::Last => track_count.saturating_sub(1),
+        };
+      } else {
+        let max_index = track_count.saturating_sub(1);
+        if self.track_table.selected_index > max_index {
+          self.track_table.selected_index = max_index;
+        }
+      }
+    } else {
+      self.track_table.selected_index = 0;
+    }
+
+    self.track_table.tracks = tracks;
+  }
+
+  pub fn is_playlist_track_table_context(&self) -> bool {
+    matches!(
+      self.track_table.context,
+      Some(TrackTableContext::MyPlaylists) | Some(TrackTableContext::PlaylistSearch)
+    )
+  }
+
+  pub fn current_playlist_track_table_id(&self) -> Option<PlaylistId<'static>> {
+    self
+      .is_playlist_track_table_context()
+      .then_some(self.playlist_track_table_id.clone())
+      .flatten()
+  }
+
+  pub fn current_playlist_track_total(&self) -> Option<u32> {
+    self.current_playlist_track_table_id()?;
+    self
+      .playlist_tracks
+      .as_ref()
+      .map(|playlist_tracks| playlist_tracks.total)
+  }
+
+  pub fn current_playlist_track_page(&self) -> Option<&Page<PlaylistItem>> {
+    self.current_playlist_track_table_id()?;
+    self.playlist_tracks.as_ref()
+  }
+
+  pub fn is_playlist_track_table_active_for(&self, playlist_id: &PlaylistId<'_>) -> bool {
+    self
+      .current_playlist_track_table_id()
+      .as_ref()
+      .is_some_and(|current_playlist_id| current_playlist_id.id() == playlist_id.id())
+  }
+
+  pub fn show_saved_tracks_page_at_index(&mut self, page_index: usize) {
+    let Some(saved_tracks_page) = self
+      .library
+      .saved_tracks
+      .get_results(Some(page_index))
+      .cloned()
+    else {
+      return;
+    };
+
+    self.library.saved_tracks.index = page_index;
+    self.set_saved_tracks_to_table(&saved_tracks_page);
+  }
+
+  pub fn show_playlist_tracks_page_at_index(&mut self, page_index: usize) {
+    let Some(playlist_tracks_page) = self
+      .playlist_track_pages
+      .get_results(Some(page_index))
+      .cloned()
+    else {
+      return;
+    };
+
+    self.playlist_track_pages.index = page_index;
+    self.playlist_offset = playlist_tracks_page.offset;
+    self.playlist_tracks = Some(playlist_tracks_page.clone());
+    self.set_playlist_tracks_to_table(&playlist_tracks_page);
+  }
+
+  pub fn show_playlist_tracks_page_at_offset(&mut self, offset: u32) -> Option<usize> {
+    let page_index = self.playlist_track_pages.page_index_for_offset(offset)?;
+    self.show_playlist_tracks_page_at_index(page_index);
+    Some(page_index)
+  }
+
+  pub fn next_missing_saved_tracks_offset(&self, page_index: usize) -> Option<u32> {
+    let saved_tracks_page = self.library.saved_tracks.get_results(Some(page_index))?;
+    saved_tracks_page.next.as_ref()?;
+
+    let next_offset = saved_tracks_page.offset + saved_tracks_page.limit;
+    self
+      .library
+      .saved_tracks
+      .page_index_for_offset(next_offset)
+      .is_none()
+      .then_some(next_offset)
+  }
+
+  pub fn next_missing_playlist_tracks_offset(&self, page_index: usize) -> Option<u32> {
+    let playlist_tracks_page = self.playlist_track_pages.get_results(Some(page_index))?;
+    playlist_tracks_page.next.as_ref()?;
+
+    let next_offset = playlist_tracks_page.offset + playlist_tracks_page.limit;
+    self
+      .playlist_track_pages
+      .page_index_for_offset(next_offset)
+      .is_none()
+      .then_some(next_offset)
+  }
+
+  pub fn dispatch_saved_tracks_prefetch(&mut self, offset: u32) {
+    self.dispatch(IoEvent::PreFetchSavedTracksPage {
+      offset,
+      generation: self.saved_tracks_prefetch_generation,
+    });
+  }
+
+  pub fn dispatch_playlist_tracks_prefetch(&mut self, offset: u32) {
+    if let Some(playlist_id) = self.current_playlist_track_table_id() {
+      self.dispatch(IoEvent::PreFetchPlaylistTracksPage {
+        playlist_id,
+        offset,
+        generation: self.playlist_tracks_prefetch_generation,
+      });
+    }
   }
 
   pub fn set_saved_artists_to_table(&mut self, saved_artists_page: &CursorBasedPage<FullArtist>) {
@@ -1969,15 +2205,13 @@ impl App {
 
   pub fn get_current_user_saved_tracks_next(&mut self) {
     // Before fetching the next tracks, check if we have already fetched them
-    match self
-      .library
-      .saved_tracks
-      .get_results(Some(self.library.saved_tracks.index + 1))
-      .cloned()
-    {
-      Some(saved_tracks) => {
-        self.set_saved_tracks_to_table(&saved_tracks);
-        self.library.saved_tracks.index += 1
+    let next_index = self.library.saved_tracks.index + 1;
+    match self.library.saved_tracks.get_results(Some(next_index)) {
+      Some(_) => {
+        self.show_saved_tracks_page_at_index(next_index);
+        if let Some(offset) = self.next_missing_saved_tracks_offset(next_index) {
+          self.dispatch_saved_tracks_prefetch(offset);
+        }
       }
       None => {
         if let Some(saved_tracks) = &self.library.saved_tracks.get_results(None) {
@@ -1989,13 +2223,80 @@ impl App {
   }
 
   pub fn get_current_user_saved_tracks_previous(&mut self) {
-    if self.library.saved_tracks.index > 0 {
-      self.library.saved_tracks.index -= 1;
+    if self.library.saved_tracks.index == 0 {
+      return;
     }
 
-    if let Some(saved_tracks) = &self.library.saved_tracks.get_results(None).cloned() {
-      self.set_saved_tracks_to_table(saved_tracks);
+    let previous_index = self.library.saved_tracks.index - 1;
+    self.show_saved_tracks_page_at_index(previous_index);
+    if let Some(offset) = self.next_missing_saved_tracks_offset(previous_index) {
+      self.dispatch_saved_tracks_prefetch(offset);
     }
+  }
+
+  pub fn get_playlist_tracks_next(&mut self) {
+    let Some(playlist_tracks) = self.current_playlist_track_page().cloned() else {
+      return;
+    };
+    let Some(playlist_id) = self.current_playlist_track_table_id() else {
+      return;
+    };
+    let Some(next_offset) = playlist_tracks
+      .next
+      .as_ref()
+      .map(|_| playlist_tracks.offset + playlist_tracks.limit)
+    else {
+      return;
+    };
+
+    match self.show_playlist_tracks_page_at_offset(next_offset) {
+      Some(page_index) => {
+        if let Some(offset) = self.next_missing_playlist_tracks_offset(page_index) {
+          self.dispatch_playlist_tracks_prefetch(offset);
+        }
+      }
+      None => {
+        self.dispatch(IoEvent::GetPlaylistItems(playlist_id, next_offset));
+      }
+    }
+  }
+
+  pub fn get_playlist_tracks_previous(&mut self) {
+    let Some(playlist_tracks) = self.current_playlist_track_page().cloned() else {
+      return;
+    };
+    let Some(playlist_id) = self.current_playlist_track_table_id() else {
+      return;
+    };
+    if playlist_tracks.offset == 0 {
+      return;
+    }
+
+    let previous_offset = playlist_tracks.offset.saturating_sub(playlist_tracks.limit);
+    match self.show_playlist_tracks_page_at_offset(previous_offset) {
+      Some(page_index) => {
+        if let Some(offset) = self.next_missing_playlist_tracks_offset(page_index) {
+          self.dispatch_playlist_tracks_prefetch(offset);
+        }
+      }
+      None => {
+        self.dispatch(IoEvent::GetPlaylistItems(playlist_id, previous_offset));
+      }
+    }
+  }
+
+  pub fn apply_sorted_playlist_tracks_if_current(
+    &mut self,
+    playlist_id: &PlaylistId<'_>,
+    tracks: Vec<FullTrack>,
+  ) -> bool {
+    if !self.is_playlist_track_table_active_for(playlist_id) {
+      return false;
+    }
+
+    self.replace_track_table_tracks(tracks);
+    self.track_table.selected_index = 0;
+    true
   }
 
   pub fn shuffle(&mut self) {
@@ -3182,5 +3483,361 @@ impl App {
         _ => {}
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use chrono::{Duration as ChronoDuration, Utc};
+  use rspotify::model::artist::SimplifiedArtist;
+  use rspotify::prelude::Id;
+  use std::collections::HashMap;
+  use std::sync::mpsc::channel;
+
+  fn full_track(id: &str, name: &str) -> FullTrack {
+    FullTrack {
+      album: SimplifiedAlbum {
+        name: format!("{name} Album"),
+        ..Default::default()
+      },
+      artists: vec![SimplifiedArtist {
+        name: "Artist".to_string(),
+        ..Default::default()
+      }],
+      available_markets: Vec::new(),
+      disc_number: 1,
+      duration: ChronoDuration::milliseconds(180_000),
+      explicit: false,
+      external_ids: HashMap::new(),
+      external_urls: HashMap::new(),
+      href: None,
+      id: Some(TrackId::from_id(id).unwrap().into_static()),
+      is_local: false,
+      is_playable: Some(true),
+      linked_from: None,
+      restrictions: None,
+      name: name.to_string(),
+      popularity: 50,
+      preview_url: None,
+      track_number: 1,
+    }
+  }
+
+  fn saved_track(id: &str, name: &str) -> SavedTrack {
+    SavedTrack {
+      added_at: Utc::now(),
+      track: full_track(id, name),
+    }
+  }
+
+  fn saved_tracks_page(offset: u32, total: u32, ids: &[&str], has_next: bool) -> Page<SavedTrack> {
+    Page {
+      href: "https://example.com/me/tracks".to_string(),
+      items: ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| saved_track(id, &format!("Track {offset}-{index}")))
+        .collect(),
+      limit: ids.len() as u32,
+      next: has_next.then(|| "https://example.com/me/tracks?next".to_string()),
+      offset,
+      previous: None,
+      total,
+    }
+  }
+
+  fn empty_playlist_page(
+    offset: u32,
+    total: u32,
+    limit: u32,
+    has_next: bool,
+  ) -> Page<PlaylistItem> {
+    Page {
+      href: "https://example.com/playlists/test/items".to_string(),
+      items: vec![],
+      limit,
+      next: has_next.then(|| "https://example.com/playlists/test/items?next".to_string()),
+      offset,
+      previous: None,
+      total,
+    }
+  }
+
+  fn playlist_id(id: &str) -> PlaylistId<'static> {
+    PlaylistId::from_id(id).unwrap().into_static()
+  }
+
+  #[test]
+  fn upsert_page_by_offset_preserves_active_index() {
+    let mut pages = ScrollableResultPages::new();
+    pages.add_pages(saved_tracks_page(
+      0,
+      4,
+      &["0000000000000000000001", "0000000000000000000002"],
+      true,
+    ));
+
+    let inserted_index = pages.upsert_page_by_offset(saved_tracks_page(
+      2,
+      4,
+      &["0000000000000000000003", "0000000000000000000004"],
+      false,
+    ));
+
+    assert_eq!(inserted_index, 1);
+    assert_eq!(pages.index, 0);
+    assert_eq!(pages.pages.len(), 2);
+  }
+
+  #[test]
+  fn upsert_page_by_offset_replaces_duplicate_page() {
+    let mut pages = ScrollableResultPages::new();
+    pages.add_pages(saved_tracks_page(
+      0,
+      2,
+      &["0000000000000000000001", "0000000000000000000002"],
+      false,
+    ));
+
+    let replaced_index = pages.upsert_page_by_offset(saved_tracks_page(
+      0,
+      2,
+      &["0000000000000000000003", "0000000000000000000004"],
+      false,
+    ));
+
+    assert_eq!(replaced_index, 0);
+    assert_eq!(pages.pages.len(), 1);
+    assert_eq!(
+      pages.pages[0].items[0].track.id.as_ref().unwrap().id(),
+      "0000000000000000000003"
+    );
+  }
+
+  #[test]
+  fn upsert_page_by_offset_keeps_active_page_when_inserting_before_it() {
+    let mut pages = ScrollableResultPages::new();
+    pages.add_pages(saved_tracks_page(
+      0,
+      6,
+      &["0000000000000000000001", "0000000000000000000002"],
+      true,
+    ));
+    pages.add_pages(saved_tracks_page(
+      4,
+      6,
+      &["0000000000000000000005", "0000000000000000000006"],
+      false,
+    ));
+    pages.index = 1;
+
+    let inserted_index = pages.upsert_page_by_offset(saved_tracks_page(
+      2,
+      6,
+      &["0000000000000000000003", "0000000000000000000004"],
+      true,
+    ));
+
+    assert_eq!(inserted_index, 1);
+    assert_eq!(pages.index, 2);
+    assert_eq!(pages.pages[pages.index].offset, 4);
+  }
+
+  #[test]
+  fn reset_saved_tracks_view_clears_cached_pages_and_bumps_generation() {
+    let (tx, _rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    app.saved_tracks_prefetch_generation = 7;
+    app.library.saved_tracks.add_pages(saved_tracks_page(
+      0,
+      2,
+      &["0000000000000000000001", "0000000000000000000002"],
+      false,
+    ));
+    app.track_table.tracks = vec![
+      full_track("0000000000000000000001", "Track 1"),
+      full_track("0000000000000000000002", "Track 2"),
+    ];
+    app.track_table.selected_index = 1;
+
+    app.reset_saved_tracks_view();
+
+    assert_eq!(app.saved_tracks_prefetch_generation, 8);
+    assert!(app.library.saved_tracks.pages.is_empty());
+    assert!(app.track_table.tracks.is_empty());
+    assert_eq!(app.track_table.selected_index, 0);
+    assert_eq!(
+      app.track_table.context,
+      Some(TrackTableContext::SavedTracks)
+    );
+  }
+
+  #[test]
+  fn reset_playlist_tracks_view_clears_cached_pages_and_bumps_generation() {
+    let (tx, _rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    let playlist_id = PlaylistId::from_id("37i9dQZF1DXcBWIGoYBM5M")
+      .unwrap()
+      .into_static();
+    app.playlist_tracks_prefetch_generation = 4;
+    app.playlist_track_table_id = Some(playlist_id.clone());
+    app
+      .playlist_track_pages
+      .add_pages(empty_playlist_page(0, 40, 20, true));
+    app.playlist_tracks = Some(empty_playlist_page(0, 40, 20, true));
+    app.playlist_offset = 20;
+    app.track_table.selected_index = 1;
+    app.track_table.tracks = vec![
+      full_track("0000000000000000000001", "Track 1"),
+      full_track("0000000000000000000002", "Track 2"),
+    ];
+
+    app.reset_playlist_tracks_view(playlist_id.clone(), TrackTableContext::MyPlaylists);
+
+    assert_eq!(app.playlist_tracks_prefetch_generation, 5);
+    assert_eq!(app.playlist_track_table_id, Some(playlist_id));
+    assert!(app.playlist_track_pages.pages.is_empty());
+    assert!(app.playlist_tracks.is_none());
+    assert_eq!(app.playlist_offset, 0);
+    assert!(app.track_table.tracks.is_empty());
+    assert_eq!(app.track_table.selected_index, 0);
+    assert_eq!(
+      app.track_table.context,
+      Some(TrackTableContext::MyPlaylists)
+    );
+  }
+
+  #[test]
+  fn playlist_next_requests_adjacent_offset_when_cache_is_sparse() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    let playlist_id = playlist_id("37i9dQZF1DXcBWIGoYBM5M");
+    let first_page = empty_playlist_page(0, 100, 20, true);
+    let last_page = empty_playlist_page(80, 100, 20, false);
+
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(playlist_id.clone());
+    app
+      .playlist_track_pages
+      .upsert_page_by_offset(first_page.clone());
+    app.playlist_track_pages.upsert_page_by_offset(last_page);
+    app.playlist_tracks = Some(first_page);
+    app.playlist_offset = 0;
+
+    app.get_playlist_tracks_next();
+
+    match rx.recv().unwrap() {
+      IoEvent::GetPlaylistItems(id, offset) => {
+        assert_eq!(id.id(), playlist_id.id());
+        assert_eq!(offset, 20);
+      }
+      _ => panic!("unexpected event"),
+    }
+  }
+
+  #[test]
+  fn playlist_previous_requests_adjacent_offset_when_cache_is_sparse() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    let playlist_id = playlist_id("37i9dQZF1DX4WYpdgoIcn6");
+    let first_page = empty_playlist_page(0, 100, 20, true);
+    let last_page = empty_playlist_page(80, 100, 20, false);
+
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(playlist_id.clone());
+    app.playlist_track_pages.upsert_page_by_offset(first_page);
+    app
+      .playlist_track_pages
+      .upsert_page_by_offset(last_page.clone());
+    app.playlist_tracks = Some(last_page);
+    app.playlist_offset = 80;
+
+    app.get_playlist_tracks_previous();
+
+    match rx.recv().unwrap() {
+      IoEvent::GetPlaylistItems(id, offset) => {
+        assert_eq!(id.id(), playlist_id.id());
+        assert_eq!(offset, 60);
+      }
+      _ => panic!("unexpected event"),
+    }
+  }
+
+  #[test]
+  fn playlist_next_uses_cached_adjacent_page_before_fetching() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    let playlist_id = playlist_id("37i9dQZF1DX4WYpdgoIcn6");
+    let first_page = empty_playlist_page(0, 60, 20, true);
+    let second_page = empty_playlist_page(20, 60, 20, true);
+
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(playlist_id.clone());
+    app
+      .playlist_track_pages
+      .upsert_page_by_offset(first_page.clone());
+    app
+      .playlist_track_pages
+      .upsert_page_by_offset(second_page.clone());
+    app.playlist_tracks = Some(first_page);
+    app.playlist_offset = 0;
+
+    app.get_playlist_tracks_next();
+
+    assert_eq!(app.playlist_offset, 20);
+    assert_eq!(
+      app.playlist_tracks.as_ref().map(|page| page.offset),
+      Some(20)
+    );
+    match rx.recv().unwrap() {
+      IoEvent::CurrentUserSavedTracksContains(track_ids) => {
+        assert!(track_ids.is_empty());
+      }
+      _ => panic!("unexpected event"),
+    }
+    match rx.recv().unwrap() {
+      IoEvent::PreFetchPlaylistTracksPage {
+        playlist_id: id,
+        offset,
+        ..
+      } => {
+        assert_eq!(id.id(), playlist_id.id());
+        assert_eq!(offset, 40);
+      }
+      _ => panic!("unexpected event"),
+    }
+  }
+
+  #[test]
+  fn apply_sorted_playlist_tracks_if_current_requires_matching_playlist_identity_and_context() {
+    let (tx, _rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    let sidebar_playlist_id = playlist_id("37i9dQZF1DXcBWIGoYBM5M");
+    let active_playlist_id = playlist_id("37i9dQZF1DX4WYpdgoIcn6");
+    let original_track = full_track("0000000000000000000001", "Original");
+
+    app.track_table.tracks = vec![original_track.clone()];
+    app.track_table.context = Some(TrackTableContext::PlaylistSearch);
+    app.playlist_track_table_id = Some(active_playlist_id.clone());
+
+    assert!(!app.apply_sorted_playlist_tracks_if_current(
+      &sidebar_playlist_id,
+      vec![full_track("0000000000000000000002", "Wrong Playlist")],
+    ));
+    assert_eq!(
+      app.track_table.tracks[0].id.as_ref().unwrap().id(),
+      original_track.id.as_ref().unwrap().id()
+    );
+
+    app.track_table.context = Some(TrackTableContext::SavedTracks);
+    assert!(!app.apply_sorted_playlist_tracks_if_current(
+      &active_playlist_id,
+      vec![full_track("0000000000000000000003", "Wrong Context")],
+    ));
+    assert_eq!(
+      app.track_table.tracks[0].id.as_ref().unwrap().id(),
+      original_track.id.as_ref().unwrap().id()
+    );
   }
 }
