@@ -1147,39 +1147,12 @@ impl App {
     playlist.owner.id.id() == user.id.id() || playlist.collaborative
   }
 
-  pub fn editable_playlist_indices(&self) -> Vec<usize> {
-    self
-      .all_playlists
-      .iter()
-      .enumerate()
-      .filter_map(|(index, playlist)| self.playlist_is_editable(playlist).then_some(index))
-      .collect()
-  }
-
   pub fn editable_playlists(&self) -> Vec<&SimplifiedPlaylist> {
     self
       .all_playlists
       .iter()
       .filter(|playlist| self.playlist_is_editable(playlist))
       .collect()
-  }
-
-  pub fn editable_playlist_count(&self) -> usize {
-    self
-      .all_playlists
-      .iter()
-      .filter(|playlist| self.playlist_is_editable(playlist))
-      .count()
-  }
-
-  pub fn editable_playlist_at_picker_index(
-    &self,
-    picker_index: usize,
-  ) -> Option<&SimplifiedPlaylist> {
-    let editable_indices = self.editable_playlist_indices();
-    editable_indices
-      .get(picker_index)
-      .and_then(|index| self.all_playlists.get(*index))
   }
 
   pub fn begin_add_track_to_playlist_flow(
@@ -1206,7 +1179,7 @@ impl App {
       return;
     }
 
-    if self.editable_playlist_count() == 0 {
+    if self.editable_playlists().is_empty() {
       self.set_status_message("No editable playlists available".to_string(), 4);
       return;
     }
@@ -3545,14 +3518,10 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+  use crate::core::test_helpers::{private_user, simplified_playlist};
   use super::*;
   use chrono::{Duration as ChronoDuration, Utc};
-  use rspotify::model::{
-    artist::SimplifiedArtist,
-    idtypes::{PlaylistId, UserId},
-    playlist::PlaylistTracksRef,
-    user::PublicUser,
-  };
+  use rspotify::model::{artist::SimplifiedArtist, idtypes::PlaylistId};
   use rspotify::prelude::Id;
   use std::collections::HashMap;
   use std::sync::mpsc::channel;
@@ -3623,55 +3592,6 @@ mod tests {
       offset,
       previous: None,
       total,
-    }
-  }
-
-  fn private_user(id: &str) -> PrivateUser {
-    PrivateUser {
-      country: None,
-      display_name: Some("Test User".to_string()),
-      email: None,
-      explicit_content: None,
-      external_urls: HashMap::new(),
-      followers: None,
-      href: "https://api.spotify.com/v1/me".to_string(),
-      id: UserId::from_id(id).unwrap().into_static(),
-      images: None,
-      product: None,
-    }
-  }
-
-  fn public_user(id: &str, display_name: &str) -> PublicUser {
-    PublicUser {
-      display_name: Some(display_name.to_string()),
-      external_urls: HashMap::new(),
-      followers: None,
-      href: format!("https://api.spotify.com/v1/users/{id}"),
-      id: UserId::from_id(id).unwrap().into_static(),
-      images: Vec::new(),
-    }
-  }
-
-  fn simplified_playlist(
-    id: &str,
-    name: &str,
-    owner_id: &str,
-    collaborative: bool,
-  ) -> SimplifiedPlaylist {
-    SimplifiedPlaylist {
-      collaborative,
-      external_urls: HashMap::new(),
-      href: format!("https://api.spotify.com/v1/playlists/{id}"),
-      id: PlaylistId::from_id(id).unwrap().into_static(),
-      images: Vec::new(),
-      name: name.to_string(),
-      owner: public_user(owner_id, owner_id),
-      public: Some(false),
-      snapshot_id: "snapshot".to_string(),
-      tracks: PlaylistTracksRef {
-        href: format!("https://api.spotify.com/v1/playlists/{id}/tracks"),
-        total: 5,
-      },
     }
   }
 

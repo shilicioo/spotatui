@@ -378,18 +378,24 @@ fn draw_add_track_to_playlist_picker_dialog(f: &mut Frame<'_>, app: &App) {
       .alignment(Alignment::Center);
     f.render_widget(empty_text, vchunks[1]);
   } else {
+    let is_own_playlist = |playlist: &rspotify::model::SimplifiedPlaylist| -> bool {
+      app
+        .user
+        .as_ref()
+        .is_some_and(|user| user.id.id() == playlist.owner.id.id())
+    };
     let items: Vec<ListItem> = editable_playlists
       .iter()
       .map(|playlist| {
-        let owner = playlist
-          .owner
-          .display_name
-          .as_deref()
-          .unwrap_or_else(|| playlist.owner.id.id());
-        let label = if playlist.collaborative {
-          format!("{} - {} (collab)", playlist.name, owner)
+        let label = if is_own_playlist(playlist) {
+          playlist.name.clone()
         } else {
-          format!("{} - {}", playlist.name, owner)
+          let owner = playlist
+            .owner
+            .display_name
+            .as_deref()
+            .unwrap_or_else(|| playlist.owner.id.id());
+          format!("{} - {} (collab)", playlist.name, owner)
         };
         ListItem::new(Span::raw(label))
       })

@@ -53,7 +53,7 @@ fn handle_confirmation_dialog(key: Key, app: &mut App, dialog_context: DialogCon
 }
 
 fn handle_add_to_playlist_picker(key: Key, app: &mut App) {
-  let editable_playlists = app.editable_playlist_indices();
+  let editable_playlists = app.editable_playlists();
   let playlist_count = editable_playlists.len();
   match key {
     k if common_key_events::down_event(k) => {
@@ -93,11 +93,10 @@ fn handle_add_to_playlist_picker(key: Key, app: &mut App) {
     }
     Key::Enter => {
       if let Some(pending_add) = app.pending_playlist_track_add.clone() {
-        if let Some(playlist) = app.editable_playlist_at_picker_index(
-          app
-            .playlist_picker_selected_index
-            .min(playlist_count.saturating_sub(1)),
-        ) {
+        let selected = app
+          .playlist_picker_selected_index
+          .min(playlist_count.saturating_sub(1));
+        if let Some(playlist) = editable_playlists.get(selected) {
           app.dispatch(IoEvent::AddTrackToPlaylist(
             playlist.id.clone().into_static(),
             pending_add.track_id,
@@ -141,66 +140,12 @@ mod tests {
   use super::*;
   use crate::core::{
     app::{PendingPlaylistTrackAdd, RouteId},
+    test_helpers::{private_user, simplified_playlist},
     user_config::UserConfig,
   };
-  use rspotify::model::{
-    idtypes::{PlaylistId, TrackId, UserId},
-    page::Page,
-    playlist::PlaylistTracksRef,
-    user::{PrivateUser, PublicUser},
-    SimplifiedPlaylist,
-  };
+  use rspotify::model::{idtypes::TrackId, page::Page};
   use rspotify::prelude::Id;
-  use std::{collections::HashMap, sync::mpsc::channel, time::SystemTime};
-
-  fn private_user(id: &str) -> PrivateUser {
-    PrivateUser {
-      country: None,
-      display_name: Some("Test User".to_string()),
-      email: None,
-      explicit_content: None,
-      external_urls: HashMap::new(),
-      followers: None,
-      href: "https://api.spotify.com/v1/me".to_string(),
-      id: UserId::from_id(id).unwrap().into_static(),
-      images: None,
-      product: None,
-    }
-  }
-
-  fn public_user(id: &str) -> PublicUser {
-    PublicUser {
-      display_name: Some(id.to_string()),
-      external_urls: HashMap::new(),
-      followers: None,
-      href: format!("https://api.spotify.com/v1/users/{id}"),
-      id: UserId::from_id(id).unwrap().into_static(),
-      images: Vec::new(),
-    }
-  }
-
-  fn simplified_playlist(
-    id: &str,
-    name: &str,
-    owner_id: &str,
-    collaborative: bool,
-  ) -> SimplifiedPlaylist {
-    SimplifiedPlaylist {
-      collaborative,
-      external_urls: HashMap::new(),
-      href: format!("https://api.spotify.com/v1/playlists/{id}"),
-      id: PlaylistId::from_id(id).unwrap().into_static(),
-      images: Vec::new(),
-      name: name.to_string(),
-      owner: public_user(owner_id),
-      public: Some(false),
-      snapshot_id: "snapshot".to_string(),
-      tracks: PlaylistTracksRef {
-        href: format!("https://api.spotify.com/v1/playlists/{id}/tracks"),
-        total: 5,
-      },
-    }
-  }
+  use std::{sync::mpsc::channel, time::SystemTime};
 
   #[test]
   fn confirmation_dialog_toggles_with_vim_hl() {

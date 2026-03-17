@@ -564,17 +564,12 @@ mod tests {
   use super::*;
   use crate::core::{
     app::{ActiveBlock, RouteId},
+    test_helpers::{private_user, simplified_playlist},
     user_config::UserConfig,
   };
   use chrono::Duration as ChronoDuration;
   use rspotify::model::{
-    artist::SimplifiedArtist,
-    idtypes::{PlaylistId, TrackId, UserId},
-    page::Page,
-    playlist::PlaylistTracksRef,
-    track::FullTrack,
-    user::{PrivateUser, PublicUser},
-    SimplifiedAlbum, SimplifiedPlaylist,
+    artist::SimplifiedArtist, idtypes::TrackId, page::Page, track::FullTrack, SimplifiedAlbum,
   };
   use std::{collections::HashMap, sync::mpsc::channel, time::SystemTime};
 
@@ -607,50 +602,6 @@ mod tests {
     }
   }
 
-  fn private_user(id: &str) -> PrivateUser {
-    PrivateUser {
-      country: None,
-      display_name: Some("Test User".to_string()),
-      email: None,
-      explicit_content: None,
-      external_urls: HashMap::new(),
-      followers: None,
-      href: "https://api.spotify.com/v1/me".to_string(),
-      id: UserId::from_id(id).unwrap().into_static(),
-      images: None,
-      product: None,
-    }
-  }
-
-  fn public_user(id: &str) -> PublicUser {
-    PublicUser {
-      display_name: Some(id.to_string()),
-      external_urls: HashMap::new(),
-      followers: None,
-      href: format!("https://api.spotify.com/v1/users/{id}"),
-      id: UserId::from_id(id).unwrap().into_static(),
-      images: Vec::new(),
-    }
-  }
-
-  fn simplified_playlist(id: &str, owner_id: &str) -> SimplifiedPlaylist {
-    SimplifiedPlaylist {
-      collaborative: false,
-      external_urls: HashMap::new(),
-      href: format!("https://api.spotify.com/v1/playlists/{id}"),
-      id: PlaylistId::from_id(id).unwrap().into_static(),
-      images: Vec::new(),
-      name: "Owned Playlist".to_string(),
-      owner: public_user(owner_id),
-      public: Some(false),
-      snapshot_id: "snapshot".to_string(),
-      tracks: PlaylistTracksRef {
-        href: format!("https://api.spotify.com/v1/playlists/{id}/tracks"),
-        total: 1,
-      },
-    }
-  }
-
   #[test]
   fn pressing_w_on_search_song_opens_add_to_playlist_picker() {
     let (tx, _rx) = channel();
@@ -667,7 +618,9 @@ mod tests {
     });
     app.all_playlists = vec![simplified_playlist(
       "37i9dQZF1DXcBWIGoYBM5M",
+      "Owned Playlist",
       "spotatui-owner",
+      false,
     )];
     app.search_results.tracks = Some(Page {
       href: "https://api.spotify.com/v1/search".to_string(),
