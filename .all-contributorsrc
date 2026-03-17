@@ -195,6 +195,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "higorprado",
+      "name": "Higor Prado",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1037397?v=4",
+      "profile": "https://github.com/higorprado",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,
