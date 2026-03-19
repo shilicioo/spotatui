@@ -1209,11 +1209,12 @@ of the app. Beware that this comes at a CPU cost!",
         .and_then(|v| v.parse().ok())
         .filter(|&v: &u64| v > 0)
         .unwrap_or(30);
-      let outer_timeout = Duration::from_secs(internal_timeout_secs + 15);
+      let outer_timeout = Duration::from_secs(internal_timeout_secs.saturating_add(15));
 
       let init_task = tokio::spawn(async move {
         player::StreamingPlayer::new(&client_id, &redirect_uri, streaming_config).await
       });
+      let abort_handle = init_task.abort_handle();
 
       match tokio::time::timeout(outer_timeout, init_task).await {
         Ok(Ok(Ok(p))) => {
@@ -1240,6 +1241,7 @@ of the app. Beware that this comes at a CPU cost!",
           None
         }
         Err(_) => {
+          abort_handle.abort();
           warn!(
             "streaming initialization hung unexpectedly (outer timeout {}s) - falling back to web api",
             outer_timeout.as_secs()

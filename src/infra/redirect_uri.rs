@@ -43,6 +43,13 @@ fn handle_connection(mut stream: TcpStream) -> Option<String> {
         // Extract the path from the HTTP request (e.g., "/callback?code=...&state=...")
         let path = split[1];
 
+        // Only accept requests that contain a `code` query parameter — the OAuth callback.
+        // Ignore browser noise like /favicon.ico, pre-flight requests, etc.
+        if !path.contains("code=") {
+          send_error_response("Not a callback request".to_string(), stream);
+          return None;
+        }
+
         // Parse the host header to build the full URL
         let host = request
           .lines()
@@ -152,6 +159,20 @@ mod tests {
   fn preflight_single_token_returns_none() {
     // A single token (no path) also triggers the malformed branch → None, no panic
     let result = send_to_handle_connection(b"GET");
+    assert!(result.is_none());
+  }
+
+  #[test]
+  fn favicon_request_returns_none() {
+    let request = b"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:8989\r\n\r\n";
+    let result = send_to_handle_connection(request);
+    assert!(result.is_none());
+  }
+
+  #[test]
+  fn root_request_returns_none() {
+    let request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8989\r\n\r\n";
+    let result = send_to_handle_connection(request);
     assert!(result.is_none());
   }
 }

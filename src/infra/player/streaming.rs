@@ -392,7 +392,13 @@ impl StreamingPlayer {
 
       match timeout(Duration::from_secs(init_timeout_secs), spirc_new).await {
         Ok(Ok(result)) => break result,
-        Ok(Err(e)) if used_cached_credentials && !retried_with_fresh_credentials => {
+        Ok(Err(e))
+          if should_retry_with_fresh_credentials(
+            true,
+            used_cached_credentials,
+            retried_with_fresh_credentials,
+          ) =>
+        {
           warn!(
             "Cached streaming credentials failed ({:?}); retrying with a fresh OAuth login",
             e
@@ -613,74 +619,48 @@ impl StreamingPlayer {
 // Re-export PlayerEvent for use in other modules
 pub use librespot_playback::player::PlayerEvent;
 
+/// Returns true when a Spirc init failure should be retried with fresh OAuth
+/// credentials instead of cached ones.
+fn should_retry_with_fresh_credentials(
+  auth_error: bool,
+  used_cached: bool,
+  already_retried: bool,
+) -> bool {
+  auth_error && used_cached && !already_retried
+}
+
 #[cfg(test)]
 mod tests {
-  enum SpircOutcome {
-    Success,
-    AuthFailure(String),
-    Timeout,
-  }
-
-  fn should_retry_with_fresh_credentials(
-    outcome: &SpircOutcome,
-    used_cached: bool,
-    already_retried: bool,
-  ) -> bool {
-    matches!(outcome, SpircOutcome::AuthFailure(_)) && used_cached && !already_retried
-  }
+  use super::should_retry_with_fresh_credentials;
 
   #[test]
   fn auth_failure_with_cached_creds_triggers_retry() {
-    assert!(should_retry_with_fresh_credentials(
-      &SpircOutcome::AuthFailure("bad token".into()),
-      true,
-      false,
-    ));
+    assert!(should_retry_with_fresh_credentials(true, true, false));
   }
 
   #[test]
   fn timeout_with_cached_creds_does_not_trigger_retry() {
-    assert!(!should_retry_with_fresh_credentials(
-      &SpircOutcome::Timeout,
-      true,
-      false,
-    ));
+    assert!(!should_retry_with_fresh_credentials(false, true, false));
   }
 
   #[test]
   fn auth_failure_with_fresh_creds_does_not_trigger_retry() {
-    assert!(!should_retry_with_fresh_credentials(
-      &SpircOutcome::AuthFailure("bad token".into()),
-      false,
-      false,
-    ));
+    assert!(!should_retry_with_fresh_credentials(true, false, false));
   }
 
   #[test]
   fn timeout_with_fresh_creds_does_not_trigger_retry() {
-    assert!(!should_retry_with_fresh_credentials(
-      &SpircOutcome::Timeout,
-      false,
-      false,
-    ));
+    assert!(!should_retry_with_fresh_credentials(false, false, false));
   }
 
   #[test]
   fn auth_failure_already_retried_does_not_trigger_second_retry() {
-    assert!(!should_retry_with_fresh_credentials(
-      &SpircOutcome::AuthFailure("bad token".into()),
-      true,
-      true,
-    ));
+    assert!(!should_retry_with_fresh_credentials(true, true, true));
   }
 
   #[test]
   fn success_never_triggers_retry() {
-    assert!(!should_retry_with_fresh_credentials(
-      &SpircOutcome::Success,
-      true,
-      false,
-    ));
+    assert!(!should_retry_with_fresh_credentials(false, true, false));
   }
 }
 
