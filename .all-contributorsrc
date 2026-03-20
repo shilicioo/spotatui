@@ -204,6 +204,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "eiseq",
+      "name": "Vitali Kaplich",
+      "avatar_url": "https://avatars.githubusercontent.com/u/80960013?v=4",
+      "profile": "https://github.com/eiseq",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

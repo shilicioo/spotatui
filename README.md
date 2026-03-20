@@ -121,6 +121,10 @@ yay -S spotatui-bin
 
 # Arch Linux (AUR) - build from source
 yay -S spotatui
+
+# Void Linux (Unoffical Repo)
+echo repository=https://raw.githubusercontent.com/Event-Horizon-VL/blackhole-vl/repository-x86_64 | sudo tee /etc/xbps.d/20-repository-extra.conf
+sudo xbps-install -S spotatui
 ```
 ```nix
 # NixOS (Flake)
@@ -339,6 +343,7 @@ Originally forked from [spotify-tui](https://github.com/Rigellute/spotify-tui) b
       <td align="center" valign="top" width="14.28%"><a href="http://kathund.dev"><img src="https://avatars.githubusercontent.com/u/55346310?v=4?s=100" width="100px;" alt="Jacob"/><br /><sub><b>Jacob</b></sub></a><br /><a href="#platform-Kathund" title="Packaging/porting to new platform">📦</a></td>
       <td align="center" valign="top" width="14.28%"><a href="http://dominicklee.net"><img src="https://avatars.githubusercontent.com/u/43938540?v=4?s=100" width="100px;" alt="Dominick Lee"/><br /><sub><b>Dominick Lee</b></sub></a><br /><a href="https://github.com/LargeModGames/spotatui/commits?author=domogami" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/higorprado"><img src="https://avatars.githubusercontent.com/u/1037397?v=4?s=100" width="100px;" alt="Higor Prado"/><br /><sub><b>Higor Prado</b></sub></a><br /><a href="https://github.com/LargeModGames/spotatui/commits?author=higorprado" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/eiseq"><img src="https://avatars.githubusercontent.com/u/80960013?v=4?s=100" width="100px;" alt="Vitali Kaplich"/><br /><sub><b>Vitali Kaplich</b></sub></a><br /><a href="https://github.com/LargeModGames/spotatui/commits?author=eiseq" title="Documentation">📖</a></td>
     </tr>
   </tbody>
 </table>

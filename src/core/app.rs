@@ -25,7 +25,7 @@ use rspotify::{
 };
 use std::cell::Cell;
 use std::sync::mpsc::Sender;
-#[cfg(feature = "streaming")]
+#[cfg(any(feature = "streaming", all(feature = "mpris", target_os = "linux")))]
 use std::sync::Arc;
 use std::{
   cmp::{max, min},

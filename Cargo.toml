@@ -98,7 +98,7 @@ objc2 = { version = "0.6", optional = true }
 block2 = { version = "0.6", optional = true }
 
 [features]
-default = ["telemetry", "streaming", "audio-viz-cpal", "macos-media", "discord-rpc"]
+default = ["telemetry", "streaming", "audio-viz-cpal", "macos-media", "discord-rpc", "mpris"]
 telemetry = []
 streaming = ["librespot-core", "librespot-playback", "librespot-connect", "librespot-oauth", "librespot-metadata", "librespot-protocol", "protobuf"]
 # Audio backend features
@@ -112,7 +112,7 @@ sdl-backend = ["streaming", "librespot-playback/sdl-backend"]
 gstreamer-backend = ["streaming", "librespot-playback/gstreamer-backend"]
 audio-viz = ["realfft", "pipewire"]
 audio-viz-cpal = ["realfft", "cpal"]  # Alternative for Windows/macOS or if pipewire issues
-mpris = ["mpris-server", "streaming"]  # MPRIS D-Bus integration (Linux only, requires streaming)
+mpris = ["mpris-server"]  # MPRIS D-Bus integration (Linux only)
 macos-media = ["objc2-media-player", "objc2-foundation", "objc2-app-kit", "objc2", "block2", "streaming"]  # macOS Now Playing integration
 discord-rpc = ["discord-rich-presence"]
 cover-art = ["ratatui-image", "image"]

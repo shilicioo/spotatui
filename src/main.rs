@@ -65,6 +65,8 @@ use crossterm::{
   ExecutableCommand,
 };
 use log::info;
+#[cfg(feature = "streaming")]
+use log::warn;
 use ratatui::backend::Backend;
 use rspotify::{
   prelude::*,
@@ -142,6 +144,15 @@ struct MprisMetadata {
 }
 #[cfg(feature = "mpris")]
 type MprisMetadataTuple = (String, Vec<String>, String, u32, Option<String>);
+
+#[cfg(all(feature = "mpris", target_os = "linux"))]
+#[derive(Default)]
+struct MprisState {
+  last_metadata: Option<MprisMetadata>,
+  last_is_playing: Option<bool>,
+  last_shuffle: Option<bool>,
+  last_loop: Option<mpris::LoopStatusEvent>,
+}
 
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
 #[derive(Default, PartialEq)]
@@ -245,6 +256,26 @@ fn get_mpris_metadata(app: &App) -> Option<MprisMetadataTuple> {
   use crate::tui::ui::util::create_artist_string;
   use rspotify::model::PlayableItem;
 
+  // Prefer native_track_info for immediate updates (bypasses API polling delay)
+  if let Some(native_info) = &app.native_track_info {
+    // Art URL comes from playback context since native_track_info doesn't carry it
+    let art_url = app
+      .current_playback_context
+      .as_ref()
+      .and_then(|ctx| ctx.item.as_ref())
+      .and_then(|item| match item {
+        PlayableItem::Track(t) => t.album.images.first().map(|i| i.url.clone()),
+        PlayableItem::Episode(e) => e.images.first().map(|i| i.url.clone()),
+      });
+    return Some((
+      native_info.name.clone(),
+      vec![native_info.artists_display.clone()],
+      native_info.album.clone(),
+      native_info.duration_ms,
+      art_url,
+    ));
+  }
+
   if let Some(context) = &app.current_playback_context {
     let item = context.item.as_ref()?;
     match item {
@@ -337,13 +368,12 @@ fn update_discord_presence(
   }
 }
 
-#[cfg(feature = "mpris")]
-fn update_mpris_metadata(
-  manager: &mpris::MprisManager,
-  last_metadata: &mut Option<MprisMetadata>,
-  app: &App,
-) {
+#[cfg(all(feature = "mpris", target_os = "linux"))]
+fn update_mpris_state(manager: &mpris::MprisManager, state: &mut MprisState, app: &App) {
+  use rspotify::model::enums::RepeatState;
+
   if let Some((title, artists, album, duration_ms, art_url)) = get_mpris_metadata(app) {
+    // 1. Metadata — only if changed
     let new_metadata = MprisMetadata {
       title: title.clone(),
       artists: artists.clone(),
@@ -351,16 +381,60 @@ fn update_mpris_metadata(
       duration_ms,
       art_url: art_url.clone(),
     };
-
-    // Only update if metadata changed
-    if last_metadata.as_ref() != Some(&new_metadata) {
+    if state.last_metadata.as_ref() != Some(&new_metadata) {
       manager.set_metadata(&title, &artists, &album, duration_ms, art_url);
-      *last_metadata = Some(new_metadata);
+      state.last_metadata = Some(new_metadata);
+    }
+
+    // 2. Playback status — only if changed; prefer native_is_playing
+    let is_playing = app.native_is_playing.unwrap_or_else(|| {
+      app
+        .current_playback_context
+        .as_ref()
+        .map(|c| c.is_playing)
+        .unwrap_or(false)
+    });
+    if state.last_is_playing != Some(is_playing) {
+      manager.set_playback_status(is_playing);
+      state.last_is_playing = Some(is_playing);
+    }
+
+    // 4. Position — every tick
+    manager.set_position(app.song_progress_ms as u64);
+
+    // 5. Shuffle — only if changed
+    let shuffle = app
+      .current_playback_context
+      .as_ref()
+      .map(|c| c.shuffle_state)
+      .unwrap_or(app.user_config.behavior.shuffle_enabled);
+    if state.last_shuffle != Some(shuffle) {
+      manager.set_shuffle(shuffle);
+      state.last_shuffle = Some(shuffle);
+    }
+
+    // 6. Repeat/loop — only if changed
+    if let Some(repeat_state) = app
+      .current_playback_context
+      .as_ref()
+      .map(|c| c.repeat_state)
+    {
+      let loop_status = match repeat_state {
+        RepeatState::Off => mpris::LoopStatusEvent::None,
+        RepeatState::Track => mpris::LoopStatusEvent::Track,
+        RepeatState::Context => mpris::LoopStatusEvent::Playlist,
+      };
+      if state.last_loop != Some(loop_status) {
+        manager.set_loop_status(loop_status);
+        state.last_loop = Some(loop_status);
+      }
     }
   } else {
-    // Clear if no playback
-    if last_metadata.is_some() {
-      *last_metadata = None;
+    // 3. Stopped — if no metadata + was previously playing
+    if state.last_metadata.is_some() {
+      manager.set_stopped();
+      state.last_metadata = None;
+      state.last_is_playing = None;
     }
   }
 }
@@ -1126,26 +1200,24 @@ of the app. Beware that this comes at a CPU cost!",
       let client_id = client_config.client_id.clone();
       let redirect_uri = selected_redirect_uri.clone();
 
-      let mut init_handle = tokio::spawn(async move {
+      // Internal Spirc timeout defaults to 30s (configurable via
+      // SPOTATUI_STREAMING_INIT_TIMEOUT_SECS). The outer timeout here is a safety net
+      // that catches hangs *outside* Spirc init (e.g. OAuth callback never arriving,
+      // blocking I/O in credential retrieval). Set it above the internal timeout.
+      let internal_timeout_secs: u64 = std::env::var("SPOTATUI_STREAMING_INIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v: &u64| v > 0)
+        .unwrap_or(30);
+      let outer_timeout = Duration::from_secs(internal_timeout_secs.saturating_add(15));
+
+      let init_task = tokio::spawn(async move {
         player::StreamingPlayer::new(&client_id, &redirect_uri, streaming_config).await
       });
+      let abort_handle = init_task.abort_handle();
 
-      let init_timeout_secs = std::env::var("SPOTATUI_STREAMING_INIT_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(30);
-
-      let init_result = tokio::select! {
-        res = &mut init_handle => Some(res),
-        _ = tokio::time::sleep(std::time::Duration::from_secs(init_timeout_secs)) => {
-          init_handle.abort();
-          None
-        }
-      };
-
-      match init_result {
-        Some(Ok(Ok(p))) => {
+      match tokio::time::timeout(outer_timeout, init_task).await {
+        Ok(Ok(Ok(p))) => {
           info!(
             "native streaming player initialized as '{}'",
             p.device_name()
@@ -1154,25 +1226,26 @@ of the app. Beware that this comes at a CPU cost!",
           // which respects the user's saved device preference (e.g., spotifyd)
           Some(Arc::new(p))
         }
-        Some(Ok(Err(e))) => {
+        Ok(Ok(Err(e))) => {
           info!(
             "failed to initialize streaming: {} - falling back to web api",
             e
           );
           None
         }
-        Some(Err(e)) => {
+        Ok(Err(e)) => {
           info!(
             "streaming initialization panicked: {} - falling back to web api",
             e
           );
           None
         }
-        None => {
-          info!(
-            "streaming initialization timed out after {}s - falling back to web api",
-            init_timeout_secs
-          ); //you can adjust timeout using SPOTATUI_STREAMING_INIT_TIMEOUT_SECS environment variable
+        Err(_) => {
+          abort_handle.abort();
+          warn!(
+            "streaming initialization hung unexpectedly (outer timeout {}s) - falling back to web api",
+            outer_timeout.as_secs()
+          );
           None
         }
       }
@@ -1201,7 +1274,7 @@ of the app. Beware that this comes at a CPU cost!",
     // Create shared atomic for real-time position updates from native player
     // This avoids lock contention - the player event handler can update position
     // without needing to acquire the app mutex
-    #[cfg(feature = "streaming")]
+    #[cfg(any(feature = "streaming", all(feature = "mpris", target_os = "linux")))]
     let shared_position = Arc::new(AtomicU64::new(0));
     #[cfg(feature = "streaming")]
     let shared_position_for_events = Arc::clone(&shared_position);
@@ -1209,7 +1282,7 @@ of the app. Beware that this comes at a CPU cost!",
     let shared_position_for_ui = Arc::clone(&shared_position);
 
     // Create shared atomic for playing state (lock-free for MPRIS toggle)
-    #[cfg(feature = "streaming")]
+    #[cfg(any(feature = "streaming", all(feature = "mpris", target_os = "linux")))]
     let shared_is_playing = Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(feature = "streaming")]
     let shared_is_playing_for_events = Arc::clone(&shared_is_playing);
@@ -1226,22 +1299,18 @@ of the app. Beware that this comes at a CPU cost!",
     // Initialize MPRIS D-Bus integration for desktop media control
     // This registers spotatui as a controllable media player on the session bus
     #[cfg(all(feature = "mpris", target_os = "linux"))]
-    let mpris_manager: Option<Arc<mpris::MprisManager>> = if streaming_player.is_some() {
-      match mpris::MprisManager::new() {
-        Ok(mgr) => {
-          info!("mpris d-bus interface registered - media keys and playerctl enabled");
-          Some(Arc::new(mgr))
-        }
-        Err(e) => {
-          info!(
-            "failed to initialize mpris: {} - media key control disabled",
-            e
-          );
-          None
-        }
+    let mpris_manager: Option<Arc<mpris::MprisManager>> = match mpris::MprisManager::new() {
+      Ok(mgr) => {
+        info!("mpris d-bus interface registered - media keys and playerctl enabled");
+        Some(Arc::new(mgr))
       }
-    } else {
-      None
+      Err(e) => {
+        info!(
+          "failed to initialize mpris: {} - media key control disabled",
+          e
+        );
+        None
+      }
     };
 
     // Store MPRIS manager reference in App for emitting Seeked signals from native seeks
@@ -1298,11 +1367,15 @@ of the app. Beware that this comes at a CPU cost!",
     #[cfg(all(feature = "mpris", target_os = "linux"))]
     if let Some(ref mpris) = mpris_manager {
       if let Some(event_rx) = mpris.take_event_rx() {
+        #[cfg(feature = "streaming")]
+        let streaming_player_for_mpris = streaming_player.clone();
         let mpris_for_seek = Arc::clone(mpris);
         let app_for_mpris = Arc::clone(&app);
         tokio::spawn(async move {
           handle_mpris_events(
             event_rx,
+            #[cfg(feature = "streaming")]
+            streaming_player_for_mpris,
             shared_is_playing_for_mpris,
             shared_position_for_mpris,
             mpris_for_seek,
@@ -1344,7 +1417,7 @@ of the app. Beware that this comes at a CPU cost!",
     }
 
     // Clone MPRIS manager for player event handler
-    #[cfg(all(feature = "mpris", target_os = "linux"))]
+    #[cfg(all(feature = "streaming", feature = "mpris", target_os = "linux"))]
     let mpris_for_events = mpris_manager.clone();
 
     // Clone macOS media manager for player event handler
@@ -1541,29 +1614,28 @@ of the app. Beware that this comes at a CPU cost!",
     });
     // The UI must run in the "main" thread
     info!("starting terminal ui event loop");
-    #[cfg(all(feature = "streaming", feature = "mpris", target_os = "linux"))]
+    #[cfg(feature = "streaming")]
+    let shared_pos_for_start_ui: Option<Arc<AtomicU64>> = Some(shared_position_for_ui);
+    #[cfg(not(feature = "streaming"))]
+    let shared_pos_for_start_ui: Option<Arc<AtomicU64>> = None;
+    #[cfg(all(feature = "mpris", target_os = "linux"))]
     start_ui(
       user_config,
       &cloned_app,
-      Some(shared_position_for_ui),
+      shared_pos_for_start_ui,
       mpris_for_ui,
       discord_rpc_manager,
     )
     .await?;
-    #[cfg(all(
-      feature = "streaming",
-      not(all(feature = "mpris", target_os = "linux"))
-    ))]
+    #[cfg(not(all(feature = "mpris", target_os = "linux")))]
     start_ui(
       user_config,
       &cloned_app,
-      Some(shared_position_for_ui),
+      shared_pos_for_start_ui,
       None,
       discord_rpc_manager,
     )
     .await?;
-    #[cfg(not(feature = "streaming"))]
-    start_ui(user_config, &cloned_app, None, None, discord_rpc_manager).await?;
   }
 
   Ok(())
@@ -1586,7 +1658,7 @@ async fn start_tokio(io_rx: std::sync::mpsc::Receiver<IoEvent>, network: &mut Ne
 
 /// Handle player events from librespot and update app state directly
 /// This bypasses the Spotify Web API for instant UI updates
-#[cfg(all(feature = "streaming", feature = "mpris", target_os = "linux"))]
+#[cfg(feature = "streaming")]
 async fn handle_player_events(
   mut event_rx: librespot_playback::player::PlayerEventChannel,
   player: Arc<player::StreamingPlayer>,
@@ -1596,6 +1668,9 @@ async fn handle_player_events(
   recovery_tx: tokio::sync::mpsc::UnboundedSender<StreamingRecoveryRequest>,
   #[cfg(all(feature = "mpris", target_os = "linux"))] mpris_manager: Option<
     Arc<mpris::MprisManager>,
+  >,
+  #[cfg(all(feature = "macos-media", target_os = "macos"))] macos_media_manager: Option<
+    Arc<macos_media::MacMediaManager>,
   >,
 ) {
   use chrono::TimeDelta;
@@ -1619,8 +1694,15 @@ async fn handle_player_events(
         shared_is_playing.store(true, Ordering::Relaxed);
 
         // Update MPRIS playback status
+        #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
           mpris.set_playback_status(true);
+        }
+
+        // Update macOS Now Playing playback status
+        #[cfg(all(feature = "macos-media", target_os = "macos"))]
+        if let Some(ref macos_media) = macos_media_manager {
+          macos_media.set_playback_status(true);
         }
 
         // Always update native_is_playing - this is critical for UI state
@@ -1668,8 +1750,15 @@ async fn handle_player_events(
         shared_is_playing.store(false, Ordering::Relaxed);
 
         // Update MPRIS playback status
+        #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
           mpris.set_playback_status(false);
+        }
+
+        // Update macOS Now Playing playback status
+        #[cfg(all(feature = "macos-media", target_os = "macos"))]
+        if let Some(ref macos_media) = macos_media_manager {
+          macos_media.set_playback_status(false);
         }
 
         // Always update native_is_playing - this is critical for UI state
@@ -1695,6 +1784,12 @@ async fn handle_player_events(
         track_id: _,
         position_ms,
       } => {
+        // Update macOS Now Playing position on seek
+        #[cfg(all(feature = "macos-media", target_os = "macos"))]
+        if let Some(ref macos_media) = macos_media_manager {
+          macos_media.set_position(position_ms as u64);
+        }
+
         if let Ok(mut app) = app.try_lock() {
           app.song_progress_ms = position_ms as u128;
           app.seek_ms = None;
@@ -1728,8 +1823,21 @@ async fn handle_player_events(
         };
 
         // Update MPRIS metadata
+        #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
           mpris.set_metadata(
+            &audio_item.name,
+            &artists,
+            &album,
+            audio_item.duration_ms,
+            None,
+          );
+        }
+
+        // Update macOS Now Playing metadata
+        #[cfg(all(feature = "macos-media", target_os = "macos"))]
+        if let Some(ref macos_media) = macos_media_manager {
+          macos_media.set_metadata(
             &audio_item.name,
             &artists,
             &album,
@@ -1757,8 +1865,15 @@ async fn handle_player_events(
       }
       PlayerEvent::Stopped { .. } => {
         // Update MPRIS status
+        #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
           mpris.set_stopped();
+        }
+
+        // Update macOS Now Playing status
+        #[cfg(all(feature = "macos-media", target_os = "macos"))]
+        if let Some(ref macos_media) = macos_media_manager {
+          macos_media.set_stopped();
         }
 
         // When a track stops, refresh state.
@@ -1781,8 +1896,15 @@ async fn handle_player_events(
       }
       PlayerEvent::EndOfTrack { track_id, .. } => {
         // Update MPRIS status
+        #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
           mpris.set_stopped();
+        }
+
+        // Update macOS Now Playing status
+        #[cfg(all(feature = "macos-media", target_os = "macos"))]
+        if let Some(ref macos_media) = macos_media_manager {
+          macos_media.set_stopped();
         }
 
         if let Ok(mut app) = app.try_lock() {
@@ -1809,8 +1931,14 @@ async fn handle_player_events(
       PlayerEvent::VolumeChanged { volume } => {
         // Update MPRIS volume
         let volume_percent = ((volume as f64 / 65535.0) * 100.0).round() as u8;
+        #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
           mpris.set_volume(volume_percent);
+        }
+
+        #[cfg(all(feature = "macos-media", target_os = "macos"))]
+        if let Some(ref macos_media) = macos_media_manager {
+          macos_media.set_volume(volume_percent);
         }
 
         if let Ok(mut app) = app.try_lock() {
@@ -1832,13 +1960,25 @@ async fn handle_player_events(
         shared_position.store(position_ms as u64, Ordering::Relaxed);
 
         // Update MPRIS position so external clients (playerctl, desktop widgets) stay in sync
+        #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
           mpris.set_position(position_ms as u64);
         }
+
+        #[cfg(all(feature = "macos-media", target_os = "macos"))]
+        if let Some(ref macos_media) = macos_media_manager {
+          macos_media.set_position(position_ms as u64);
+        }
       }
       PlayerEvent::SessionDisconnected { .. } => {
+        #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
           mpris.set_stopped();
+        }
+
+        #[cfg(all(feature = "macos-media", target_os = "macos"))]
+        if let Some(ref macos_media) = macos_media_manager {
+          macos_media.set_stopped();
         }
 
         if let Some(request) = disconnect_streaming_player(
@@ -1985,438 +2125,217 @@ fn spawn_player_event_handler(ctx: PlayerEventContext) {
   let shared_position = Arc::clone(&ctx.shared_position);
   let shared_is_playing = Arc::clone(&ctx.shared_is_playing);
   let recovery_tx = ctx.recovery_tx.clone();
-
   #[cfg(all(feature = "mpris", target_os = "linux"))]
-  {
-    let mpris_manager = ctx.mpris_manager.clone();
-    tokio::spawn(async move {
-      handle_player_events(
-        event_rx,
-        player,
-        app,
-        shared_position,
-        shared_is_playing,
-        recovery_tx,
-        mpris_manager,
-      )
-      .await;
-    });
-  }
+  let mpris_manager = ctx.mpris_manager.clone();
+  #[cfg(all(feature = "macos-media", target_os = "macos"))]
+  let macos_media_manager = ctx.macos_media_manager.clone();
 
-  #[cfg(not(all(feature = "mpris", target_os = "linux")))]
-  {
-    #[cfg(all(feature = "macos-media", target_os = "macos"))]
-    let macos_media_manager = ctx.macos_media_manager.clone();
-    tokio::spawn(async move {
-      handle_player_events(
-        event_rx,
-        player,
-        app,
-        shared_position,
-        shared_is_playing,
-        recovery_tx,
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        macos_media_manager,
-      )
-      .await;
-    });
-  }
-}
-
-/// Handle player events from librespot and update app state directly
-/// This bypasses the Spotify Web API for instant UI updates
-#[cfg(all(
-  feature = "streaming",
-  not(all(feature = "mpris", target_os = "linux"))
-))]
-async fn handle_player_events(
-  mut event_rx: librespot_playback::player::PlayerEventChannel,
-  player: Arc<player::StreamingPlayer>,
-  app: Arc<Mutex<App>>,
-  shared_position: Arc<AtomicU64>,
-  shared_is_playing: Arc<std::sync::atomic::AtomicBool>,
-  recovery_tx: tokio::sync::mpsc::UnboundedSender<StreamingRecoveryRequest>,
-  #[cfg(all(feature = "macos-media", target_os = "macos"))] macos_media_manager: Option<
-    Arc<macos_media::MacMediaManager>,
-  >,
-) {
-  use chrono::TimeDelta;
-  use player::PlayerEvent;
-  use std::sync::atomic::Ordering;
-
-  while let Some(event) = event_rx.recv().await {
-    if !is_current_streaming_player(&app, &player).await {
-      continue;
-    }
-
-    match event {
-      PlayerEvent::Playing {
-        play_request_id: _,
-        track_id,
-        position_ms,
-      } => {
-        shared_is_playing.store(true, Ordering::Relaxed);
-
-        // Update macOS Now Playing playback status
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_playback_status(true);
-        }
-
-        {
-          let mut app_lock = app.lock().await;
-          app_lock.native_is_playing = Some(true);
-        }
-        if let Ok(mut app) = app.try_lock() {
-          app.song_progress_ms = position_ms as u128;
-          if let Some(ref mut ctx) = app.current_playback_context {
-            ctx.is_playing = true;
-            ctx.progress = Some(TimeDelta::milliseconds(position_ms as i64));
-          }
-          app.instant_since_last_current_playback_poll = std::time::Instant::now();
-          let track_id_str = track_id.to_string();
-          if app.last_track_id.as_ref() != Some(&track_id_str) {
-            app.last_track_id = Some(track_id_str);
-            app.dispatch(IoEvent::GetCurrentPlayback);
-          }
-          // If stop-after-track was requested, pause now that Spirc has started the next track
-          if app.pending_stop_after_track {
-            app.pending_stop_after_track = false;
-            if let Some(ref mut ctx) = app.current_playback_context {
-              ctx.is_playing = false;
-            }
-            app.dispatch(IoEvent::PausePlayback);
-          }
-        }
-      }
-      PlayerEvent::Paused {
-        play_request_id: _,
-        track_id: _,
-        position_ms,
-      } => {
-        shared_is_playing.store(false, Ordering::Relaxed);
-
-        // Update macOS Now Playing playback status
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_playback_status(false);
-        }
-
-        {
-          let mut app_lock = app.lock().await;
-          app_lock.native_is_playing = Some(false);
-        }
-        if let Ok(mut app) = app.try_lock() {
-          app.song_progress_ms = position_ms as u128;
-          if let Some(ref mut ctx) = app.current_playback_context {
-            ctx.is_playing = false;
-            ctx.progress = Some(TimeDelta::milliseconds(position_ms as i64));
-          }
-          app.instant_since_last_current_playback_poll = std::time::Instant::now();
-        }
-      }
-      PlayerEvent::Seeked {
-        play_request_id: _,
-        track_id: _,
-        position_ms,
-      } => {
-        // Update macOS Now Playing position on seek
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_position(position_ms as u64);
-        }
-
-        if let Ok(mut app) = app.try_lock() {
-          app.song_progress_ms = position_ms as u128;
-          app.seek_ms = None;
-          if let Some(ref mut ctx) = app.current_playback_context {
-            ctx.progress = Some(TimeDelta::milliseconds(position_ms as i64));
-          }
-          app.instant_since_last_current_playback_poll = std::time::Instant::now();
-        }
-      }
-      PlayerEvent::TrackChanged { audio_item } => {
-        use librespot_metadata::audio::UniqueFields;
-
-        let (artists, album) = match &audio_item.unique_fields {
-          UniqueFields::Track { artists, album, .. } => {
-            let artist_names: Vec<String> = artists.0.iter().map(|a| a.name.clone()).collect();
-            (artist_names, album.clone())
-          }
-          UniqueFields::Episode { show_name, .. } => (vec![show_name.clone()], String::new()),
-          UniqueFields::Local { artists, album, .. } => {
-            let artist_vec = artists
-              .as_ref()
-              .map(|a| vec![a.clone()])
-              .unwrap_or_default();
-            let album_str = album.clone().unwrap_or_default();
-            (artist_vec, album_str)
-          }
-        };
-
-        // Update macOS Now Playing metadata
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_metadata(
-            &audio_item.name,
-            &artists,
-            &album,
-            audio_item.duration_ms,
-            None,
-          );
-        }
-
-        // Track metadata updates are critical for playbar correctness; do not drop
-        // them when the UI thread is briefly busy.
-        let mut app = app.lock().await;
-        app.native_track_info = Some(app::NativeTrackInfo {
-          name: audio_item.name.clone(),
-          artists_display: artists.join(", "),
-          album: album.clone(),
-          duration_ms: audio_item.duration_ms,
-        });
-        app.song_progress_ms = 0;
-        app.last_track_id = Some(audio_item.track_id.to_string());
-        app.instant_since_last_current_playback_poll = std::time::Instant::now();
-        app.dispatch(IoEvent::GetCurrentPlayback);
-      }
-      PlayerEvent::Stopped { .. } => {
-        // Update macOS Now Playing status
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_stopped();
-        }
-
-        if let Ok(mut app) = app.try_lock() {
-          if let Some(ref mut ctx) = app.current_playback_context {
-            ctx.is_playing = false;
-          }
-          app.song_progress_ms = 0;
-          app.last_track_id = None;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        if let Ok(mut app) = app.try_lock() {
-          app.dispatch(IoEvent::GetCurrentPlayback);
-        }
-      }
-      PlayerEvent::EndOfTrack { track_id, .. } => {
-        // Update macOS Now Playing status
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_stopped();
-        }
-
-        if let Ok(mut app) = app.try_lock() {
-          if let Some(ref mut ctx) = app.current_playback_context {
-            ctx.is_playing = false;
-          }
-          app.song_progress_ms = 0;
-          app.last_track_id = None;
-          if app.user_config.behavior.stop_after_current_track {
-            // Spirc will auto-advance; flag the next Playing event to pause immediately
-            app.pending_stop_after_track = true;
-          }
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        if let Ok(mut app) = app.try_lock() {
-          if !app.user_config.behavior.stop_after_current_track {
-            app.dispatch(IoEvent::EnsurePlaybackContinues(track_id.to_string()));
-          }
-        }
-      }
-      PlayerEvent::VolumeChanged { volume } => {
-        let volume_percent = ((volume as f64 / 65535.0) * 100.0).round() as u8;
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_volume(volume_percent);
-        }
-
-        if let Ok(mut app) = app.try_lock() {
-          let volume_percent = volume_percent as u32;
-          if let Some(ref mut ctx) = app.current_playback_context {
-            ctx.device.volume_percent = Some(volume_percent);
-          }
-          app.user_config.behavior.volume_percent = volume_percent.min(100) as u8;
-          let _ = app.user_config.save_config();
-        }
-      }
-      PlayerEvent::PositionChanged {
-        play_request_id: _,
-        track_id: _,
-        position_ms,
-      } => {
-        shared_position.store(position_ms as u64, Ordering::Relaxed);
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_position(position_ms as u64);
-        }
-      }
-      PlayerEvent::SessionDisconnected { .. } => {
-        #[cfg(all(feature = "macos-media", target_os = "macos"))]
-        if let Some(ref macos_media) = macos_media_manager {
-          macos_media.set_stopped();
-        }
-
-        if let Some(request) = disconnect_streaming_player(
-          &app,
-          &player,
-          &shared_position,
-          &shared_is_playing,
-          "Native streaming disconnected; attempting recovery.",
-        )
-        .await
-        {
-          let _ = recovery_tx.send(request);
-        }
-        return;
-      }
-      _ => {}
-    }
-  }
-
-  if let Some(request) = disconnect_streaming_player(
-    &app,
-    &player,
-    &shared_position,
-    &shared_is_playing,
-    "Native streaming stopped; attempting recovery.",
-  )
-  .await
-  {
-    let _ = recovery_tx.send(request);
-  }
+  tokio::spawn(async move {
+    handle_player_events(
+      event_rx,
+      player,
+      app,
+      shared_position,
+      shared_is_playing,
+      recovery_tx,
+      #[cfg(all(feature = "mpris", target_os = "linux"))]
+      mpris_manager,
+      #[cfg(all(feature = "macos-media", target_os = "macos"))]
+      macos_media_manager,
+    )
+    .await;
+  });
 }
 
 /// Handle MPRIS events from external clients (media keys, playerctl, etc.)
-/// Routes control requests to the native streaming player
+/// Routes to native streaming player when available, or dispatches IoEvents as fallback
 #[cfg(all(feature = "mpris", target_os = "linux"))]
 async fn handle_mpris_events(
   mut event_rx: tokio::sync::mpsc::UnboundedReceiver<mpris::MprisEvent>,
+  #[cfg(feature = "streaming")] streaming_player: Option<Arc<player::StreamingPlayer>>,
   shared_is_playing: Arc<std::sync::atomic::AtomicBool>,
   shared_position: Arc<AtomicU64>,
   mpris_manager: Arc<mpris::MprisManager>,
   app: Arc<Mutex<App>>,
 ) {
   use mpris::MprisEvent;
+  #[cfg(feature = "streaming")]
   use std::sync::atomic::Ordering;
 
   while let Some(event) = event_rx.recv().await {
-    let Some(player) = active_streaming_player(&app).await else {
-      continue;
-    };
-
     match event {
       MprisEvent::PlayPause => {
-        // Toggle based on atomic state (lock-free, always up-to-date)
-        if shared_is_playing.load(Ordering::Relaxed) {
-          player.pause();
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          if shared_is_playing.load(Ordering::Relaxed) {
+            player.pause();
+          } else {
+            player.play();
+          }
+          continue;
+        }
+        // Fallback: dispatch IoEvent
+        let mut app_lock = app.lock().await;
+        let is_playing = app_lock.native_is_playing.unwrap_or_else(|| {
+          app_lock
+            .current_playback_context
+            .as_ref()
+            .map(|c| c.is_playing)
+            .unwrap_or(false)
+        });
+        if is_playing {
+          app_lock.dispatch(IoEvent::PausePlayback);
         } else {
-          player.play();
+          app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
         }
       }
       MprisEvent::Play => {
-        player.play();
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          player.play();
+          continue;
+        }
+        let mut app_lock = app.lock().await;
+        app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
       }
       MprisEvent::Pause => {
-        player.pause();
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          player.pause();
+          continue;
+        }
+        let mut app_lock = app.lock().await;
+        app_lock.dispatch(IoEvent::PausePlayback);
       }
       MprisEvent::Next => {
-        player.activate();
-        player.next();
-        // Keep Connect + audio state in sync.
-        player.play();
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          player.activate();
+          player.next();
+          player.play();
+          continue;
+        }
+        let mut app_lock = app.lock().await;
+        app_lock.dispatch(IoEvent::NextTrack);
       }
       MprisEvent::Previous => {
-        player.activate();
-        player.prev();
-        // Keep Connect + audio state in sync.
-        player.play();
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          player.activate();
+          player.prev();
+          player.play();
+          continue;
+        }
+        let mut app_lock = app.lock().await;
+        app_lock.dispatch(IoEvent::PreviousTrack);
       }
       MprisEvent::Stop => {
-        player.stop();
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          player.stop();
+          continue;
+        }
+        let mut app_lock = app.lock().await;
+        app_lock.dispatch(IoEvent::PausePlayback);
       }
       MprisEvent::Seek(offset_micros) => {
         // MPRIS sends relative offset in microseconds (can be negative for rewind)
-        // We need to calculate: new_absolute_position = current_position + offset
-
-        // Get current position (stored in milliseconds)
-        let current_ms = shared_position.load(Ordering::Relaxed) as i64;
-
-        // Convert offset from microseconds to milliseconds
-        let offset_ms = offset_micros / 1000;
-
-        // Calculate new position, clamping to prevent going negative
-        let new_position_ms = (current_ms + offset_ms).max(0) as u32;
-
-        // Seek the player
-        player.seek(new_position_ms);
-
-        // Update shared position immediately so UI reflects the change
-        shared_position.store(new_position_ms as u64, Ordering::Relaxed);
-
-        // Update app's song_progress_ms so UI updates even when paused
-        if let Ok(mut app_lock) = app.try_lock() {
-          app_lock.song_progress_ms = new_position_ms as u128;
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          let current_ms = shared_position.load(Ordering::Relaxed) as i64;
+          let offset_ms = offset_micros / 1000;
+          let new_position_ms = (current_ms + offset_ms).max(0) as u32;
+          player.seek(new_position_ms);
+          shared_position.store(new_position_ms as u64, Ordering::Relaxed);
+          if let Ok(mut app_lock) = app.try_lock() {
+            app_lock.song_progress_ms = new_position_ms as u128;
+          }
+          mpris_manager.emit_seeked(new_position_ms as u64);
+          continue;
         }
-
-        // Emit Seeked signal so external clients know position jumped
+        // Fallback: read current position from app, dispatch Seek IoEvent
+        let mut app_lock = app.lock().await;
+        let current_ms = app_lock.song_progress_ms as i64;
+        let offset_ms = offset_micros / 1000;
+        let new_position_ms = (current_ms + offset_ms).max(0) as u32;
+        app_lock.song_progress_ms = new_position_ms as u128;
+        app_lock.dispatch(IoEvent::Seek(new_position_ms));
+        drop(app_lock);
         mpris_manager.emit_seeked(new_position_ms as u64);
       }
       MprisEvent::SetPosition(position_micros) => {
         // MPRIS SetPosition sends absolute position in microseconds
-        // Convert to milliseconds and seek directly
         let new_position_ms = (position_micros / 1000).max(0) as u32;
-
-        // Seek the player
-        player.seek(new_position_ms);
-
-        // Update shared position immediately so UI reflects the change
-        shared_position.store(new_position_ms as u64, Ordering::Relaxed);
-
-        // Update app's song_progress_ms so UI updates even when paused
-        if let Ok(mut app_lock) = app.try_lock() {
-          app_lock.song_progress_ms = new_position_ms as u128;
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          player.seek(new_position_ms);
+          shared_position.store(new_position_ms as u64, Ordering::Relaxed);
+          if let Ok(mut app_lock) = app.try_lock() {
+            app_lock.song_progress_ms = new_position_ms as u128;
+          }
+          mpris_manager.emit_seeked(new_position_ms as u64);
+          continue;
         }
-
-        // Emit Seeked signal so external clients know position jumped
+        // Fallback: dispatch Seek IoEvent
+        let mut app_lock = app.lock().await;
+        app_lock.song_progress_ms = new_position_ms as u128;
+        app_lock.dispatch(IoEvent::Seek(new_position_ms));
+        drop(app_lock);
         mpris_manager.emit_seeked(new_position_ms as u64);
       }
       MprisEvent::SetShuffle(shuffle) => {
-        if let Err(e) = player.set_shuffle(shuffle) {
-          eprintln!("MPRIS: Failed to set shuffle: {}", e);
-        } else {
-          // Update MPRIS state so clients see the new value
-          mpris_manager.set_shuffle(shuffle);
-          // Update app UI state (use await to ensure update happens)
-          let mut app_lock = app.lock().await;
-          if let Some(ref mut ctx) = app_lock.current_playback_context {
-            ctx.shuffle_state = shuffle;
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          if let Err(e) = player.set_shuffle(shuffle) {
+            eprintln!("MPRIS: Failed to set shuffle: {}", e);
+          } else {
+            mpris_manager.set_shuffle(shuffle);
+            let mut app_lock = app.lock().await;
+            if let Some(ref mut ctx) = app_lock.current_playback_context {
+              ctx.shuffle_state = shuffle;
+            }
+            app_lock.user_config.behavior.shuffle_enabled = shuffle;
           }
-          app_lock.user_config.behavior.shuffle_enabled = shuffle;
+          continue;
         }
+        // Fallback: dispatch Shuffle IoEvent
+        mpris_manager.set_shuffle(shuffle);
+        let mut app_lock = app.lock().await;
+        if let Some(ref mut ctx) = app_lock.current_playback_context {
+          ctx.shuffle_state = shuffle;
+        }
+        app_lock.user_config.behavior.shuffle_enabled = shuffle;
+        app_lock.dispatch(IoEvent::Shuffle(shuffle));
       }
       MprisEvent::SetLoopStatus(loop_status) => {
         use mpris::LoopStatusEvent;
         use rspotify::model::enums::RepeatState;
 
-        // Map MPRIS LoopStatus to Spotify RepeatState
         let repeat_state = match loop_status {
           LoopStatusEvent::None => RepeatState::Off,
           LoopStatusEvent::Track => RepeatState::Track,
           LoopStatusEvent::Playlist => RepeatState::Context,
         };
-
-        if let Err(e) = player.set_repeat_mode(repeat_state) {
-          eprintln!("MPRIS: Failed to set repeat mode: {}", e);
-        } else {
-          // Update MPRIS state so clients see the new value
-          mpris_manager.set_loop_status(loop_status);
-          // Update app UI state (use await to ensure update happens)
-          let mut app_lock = app.lock().await;
-          if let Some(ref mut ctx) = app_lock.current_playback_context {
-            ctx.repeat_state = repeat_state;
+        #[cfg(feature = "streaming")]
+        if let Some(ref player) = streaming_player {
+          if let Err(e) = player.set_repeat_mode(repeat_state) {
+            eprintln!("MPRIS: Failed to set repeat mode: {}", e);
+          } else {
+            mpris_manager.set_loop_status(loop_status);
+            let mut app_lock = app.lock().await;
+            if let Some(ref mut ctx) = app_lock.current_playback_context {
+              ctx.repeat_state = repeat_state;
+            }
           }
+          continue;
         }
+        // Fallback: dispatch Repeat IoEvent
+        mpris_manager.set_loop_status(loop_status);
+        let mut app_lock = app.lock().await;
+        if let Some(ref mut ctx) = app_lock.current_playback_context {
+          ctx.repeat_state = repeat_state;
+        }
+        app_lock.dispatch(IoEvent::Repeat(repeat_state));
       }
     }
   }
@@ -2525,8 +2444,8 @@ async fn start_ui(
   #[cfg(feature = "discord-rpc")]
   let mut discord_presence_state = DiscordPresenceState::default();
 
-  #[cfg(feature = "mpris")]
-  let mut mpris_metadata_state: Option<MprisMetadata> = None;
+  #[cfg(all(feature = "mpris", target_os = "linux"))]
+  let mut mpris_state = MprisState::default();
 
   let mut is_first_render = true;
 
@@ -2723,9 +2642,9 @@ async fn start_ui(
           update_discord_presence(manager, &mut discord_presence_state, &app);
         }
 
-        #[cfg(feature = "mpris")]
+        #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
-          update_mpris_metadata(mpris, &mut mpris_metadata_state, &app);
+          update_mpris_state(mpris, &mut mpris_state, &app);
         }
 
         // Read position from shared atomic if native streaming is active

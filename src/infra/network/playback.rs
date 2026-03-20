@@ -347,6 +347,21 @@ impl PlaybackNetwork for Network {
           return;
         }
 
+        if err.to_string().contains("504")
+          || err.to_string().contains("503")
+          || err.to_string().contains("502")
+          || err.to_string().contains("Gateway Timeout")
+          || err.to_string().contains("Service Unavailable")
+          || err.to_string().contains("Bad Gateway")
+        {
+          app.status_message = Some(
+            "Spotify server temporarily unavailable (5xx); retrying automatically.".to_string(),
+          );
+          app.status_message_expires_at = Some(Instant::now() + Duration::from_secs(10));
+          app.instant_since_last_current_playback_poll = Instant::now();
+          return;
+        }
+
         app.handle_error(err);
         return;
       }

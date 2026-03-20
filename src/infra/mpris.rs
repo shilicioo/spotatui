@@ -28,7 +28,7 @@ pub enum MprisEvent {
 }
 
 /// Loop status from MPRIS (matches mpris_server::LoopStatus)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LoopStatusEvent {
   None,
   Track,
