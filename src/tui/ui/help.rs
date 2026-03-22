@@ -150,7 +150,13 @@ pub fn get_help_docs(app: &App) -> Vec<Vec<String>> {
     ],
     vec![
       String::from("Go to lyrics view"),
-      key_bindings.basic_view.to_string(),
+      key_bindings.lyrics_view.to_string(),
+      String::from("General"),
+    ],
+    #[cfg(feature = "cover-art")]
+    vec![
+      String::from("Go to cover art view"),
+      key_bindings.cover_art_view.to_string(),
       String::from("General"),
     ],
     vec![

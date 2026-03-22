@@ -4,8 +4,9 @@ mod analysis;
 mod announcement_prompt;
 mod artist;
 mod artists;
-mod basic_view;
 mod common_key_events;
+#[cfg(feature = "cover-art")]
+mod cover_art_view;
 mod dialog;
 mod discover;
 mod empty;
@@ -15,6 +16,7 @@ mod help_menu;
 mod home;
 mod input;
 mod library;
+mod lyrics_view;
 mod mouse;
 mod party;
 mod playbar;
@@ -164,8 +166,12 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.audio_analysis => {
       app.get_audio_analysis();
     }
-    _ if key == app.user_config.keys.basic_view => {
-      app.push_navigation_stack(RouteId::BasicView, ActiveBlock::BasicView);
+    _ if key == app.user_config.keys.lyrics_view => {
+      app.push_navigation_stack(RouteId::LyricsView, ActiveBlock::LyricsView);
+    }
+    #[cfg(feature = "cover-art")]
+    _ if key == app.user_config.keys.cover_art_view => {
+      app.push_navigation_stack(RouteId::CoverArtView, ActiveBlock::CoverArtView);
     }
     _ if key == app.user_config.keys.listening_party => {
       app.push_navigation_stack(RouteId::Party, ActiveBlock::Party);
@@ -300,8 +306,12 @@ fn handle_block_events(key: Key, app: &mut App) {
     ActiveBlock::PlayBar => {
       playbar::handler(key, app);
     }
-    ActiveBlock::BasicView => {
-      basic_view::handler(key, app);
+    ActiveBlock::LyricsView => {
+      lyrics_view::handler(key, app);
+    }
+    ActiveBlock::CoverArtView => {
+      #[cfg(feature = "cover-art")]
+      cover_art_view::handler(key, app);
     }
     ActiveBlock::Dialog(_) => {
       dialog::handler(key, app);
@@ -353,6 +363,9 @@ fn handle_escape(app: &mut App) {
       app.pop_navigation_stack();
     }
     ActiveBlock::Party => {
+      app.pop_navigation_stack();
+    }
+    ActiveBlock::LyricsView | ActiveBlock::CoverArtView => {
       app.pop_navigation_stack();
     }
     // These are global views that have no active/inactive distinction so do nothing

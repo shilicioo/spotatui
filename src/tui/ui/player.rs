@@ -15,7 +15,7 @@ use rspotify::prelude::Id;
 
 use super::util::{
   create_artist_string, display_track_progress, get_color, get_track_progress_percentage,
-  BASIC_VIEW_HEIGHT,
+  FULLSCREEN_VIEW_PLAYBAR_HEIGHT,
 };
 
 const PLAYBAR_CONTROLS: [PlaybarControl; 8] = [
@@ -135,12 +135,12 @@ fn playbar_layout_areas(app: &App, layout_chunk: Rect) -> PlaybarLayoutAreas {
 
     let (artist_area, controls_area, progress_area) = split_playbar_rows(other);
 
-    return PlaybarLayoutAreas {
+    PlaybarLayoutAreas {
       artist_area,
       controls_area,
       progress_area,
       cover_art,
-    };
+    }
   }
 
   #[cfg(not(feature = "cover-art"))]
@@ -246,17 +246,157 @@ fn draw_playbar_controls(f: &mut Frame<'_>, app: &App, playbar_area: Rect) {
   }
 }
 
-pub fn draw_basic_view(f: &mut Frame<'_>, app: &App) {
+pub fn draw_lyrics_view(f: &mut Frame<'_>, app: &App) {
   let chunks = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
       Constraint::Min(0), // Lyrics Area taking all available space above
-      Constraint::Length(BASIC_VIEW_HEIGHT), // Playbar at the bottom
+      Constraint::Length(FULLSCREEN_VIEW_PLAYBAR_HEIGHT), // Playbar at the bottom
     ])
     .split(f.area());
 
   draw_lyrics(f, app, chunks[0]);
   draw_playbar(f, app, chunks[1]);
+}
+
+#[cfg(feature = "cover-art")]
+pub fn draw_cover_art_view(f: &mut Frame<'_>, app: &App) {
+  let chunks = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Min(0),
+      Constraint::Length(FULLSCREEN_VIEW_PLAYBAR_HEIGHT),
+    ])
+    .split(f.area());
+
+  draw_cover_art_content(f, app, chunks[0]);
+  draw_playbar(f, app, chunks[1]);
+}
+
+#[cfg(feature = "cover-art")]
+fn draw_cover_art_content(f: &mut Frame<'_>, app: &App, area: Rect) {
+  use ratatui::widgets::Clear;
+
+  // Clear the area to remove any lingering terminal image protocol artifacts
+  f.render_widget(Clear, area);
+
+  // Extract track info for display below the cover art
+  let (track_name, artist_str) = extract_track_info(app);
+
+  if !app.cover_art.available() {
+    let p = Paragraph::new("No cover art available")
+      .style(Style::default().fg(Color::Rgb(100, 100, 100)))
+      .alignment(Alignment::Center);
+
+    let vertical_center = area.y + area.height / 2;
+    let center_area = Rect {
+      x: area.x,
+      y: vertical_center,
+      width: area.width,
+      height: 1,
+    };
+    f.render_widget(p, center_area);
+    return;
+  }
+
+  // Reserve 3 rows at the bottom for song info (1 blank + 1 title + 1 artist)
+  let info_height = 3_u16;
+  let img_area_height = area.height.saturating_sub(info_height);
+
+  // Calculate image dimensions for a square album cover
+  // Terminal characters are taller than wide, so we use a ratio to get a square.
+  let char_aspect_ratio = 1.9_f32;
+
+  let max_height = img_area_height.saturating_sub(2);
+  let max_width = area.width.saturating_sub(2);
+
+  let img_width_from_height = ((max_height as f32) * char_aspect_ratio).ceil() as u16;
+
+  let (img_width, img_height) = if img_width_from_height > max_width {
+    let h = ((max_width as f32) / char_aspect_ratio).floor() as u16;
+    (max_width, h)
+  } else {
+    (img_width_from_height, max_height)
+  };
+
+  // Center the image horizontally, vertically within the image area
+  let x = area.x + (area.width.saturating_sub(img_width)) / 2;
+  let y = area.y + (img_area_height.saturating_sub(img_height)) / 2;
+
+  let centered_area = Rect {
+    x,
+    y,
+    width: img_width,
+    height: img_height,
+  };
+
+  app.cover_art.render_fullscreen(f, centered_area);
+
+  // Draw song info below the cover art
+  if let Some(name) = track_name {
+    let title_y = y + img_height + 1;
+    if title_y < area.y + area.height {
+      let title = Paragraph::new(name)
+        .style(
+          Style::default()
+            .fg(app.user_config.theme.selected)
+            .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center);
+      f.render_widget(
+        title,
+        Rect {
+          x: area.x,
+          y: title_y,
+          width: area.width,
+          height: 1,
+        },
+      );
+    }
+
+    if let Some(artists) = artist_str {
+      let artist_y = title_y + 1;
+      if artist_y < area.y + area.height {
+        let artist = Paragraph::new(artists)
+          .style(Style::default().fg(app.user_config.theme.playbar_text))
+          .alignment(Alignment::Center);
+        f.render_widget(
+          artist,
+          Rect {
+            x: area.x,
+            y: artist_y,
+            width: area.width,
+            height: 1,
+          },
+        );
+      }
+    }
+  }
+}
+
+#[cfg(feature = "cover-art")]
+fn extract_track_info(app: &App) -> (Option<String>, Option<String>) {
+  use rspotify::model::PlayableItem;
+
+  // Prefer native track info (more responsive after skipping tracks)
+  if let Some(ref native_info) = app.native_track_info {
+    return (
+      Some(native_info.name.clone()),
+      Some(native_info.artists_display.clone()),
+    );
+  }
+
+  if let Some(ctx) = &app.current_playback_context {
+    if let Some(track_item) = &ctx.item {
+      let (name, artists) = match track_item {
+        PlayableItem::Track(track) => (track.name.clone(), create_artist_string(&track.artists)),
+        PlayableItem::Episode(episode) => (episode.name.clone(), episode.show.name.clone()),
+      };
+      return (Some(name), Some(artists));
+    }
+  }
+
+  (None, None)
 }
 
 fn draw_lyrics(f: &mut Frame<'_>, app: &App, area: Rect) {

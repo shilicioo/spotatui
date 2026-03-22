@@ -11,6 +11,9 @@ use std::sync::Mutex;
 
 pub struct CoverArt {
   pub state: Mutex<Option<CoverArtState>>,
+  /// Separate protocol state for fullscreen cover art view, avoiding conflicts
+  /// when the same image is rendered in both the playbar and fullscreen in one frame.
+  pub fullscreen_state: Mutex<Option<CoverArtState>>,
   picker: Picker,
 }
 
@@ -36,6 +39,7 @@ impl CoverArt {
     Self {
       picker,
       state: Mutex::new(None),
+      fullscreen_state: Mutex::new(None),
     }
   }
 
@@ -81,11 +85,18 @@ impl CoverArt {
         Err(e) => return Err(anyhow!(e)),
       };
 
-      let image_protocol = self
-        .picker
-        .new_resize_protocol(image::load_from_memory(&file).map_err(|e| anyhow!(e))?);
+      let img = image::load_from_memory(&file).map_err(|e| anyhow!(e))?;
+
+      // Create two separate protocol instances so the playbar and fullscreen
+      // views can render independently without conflicting.
+      let image_protocol = self.picker.new_resize_protocol(img.clone());
+      let fullscreen_protocol = self.picker.new_resize_protocol(img);
 
       self.set_state(CoverArtState::new(image.url.clone(), image_protocol));
+      {
+        let mut lock = self.fullscreen_state.lock().unwrap();
+        *lock = Some(CoverArtState::new(image.url.clone(), fullscreen_protocol));
+      }
       info!("got new cover art: {}", image.url);
     } else {
       debug!("skipping image refresh: cover art already downloaded");
@@ -99,7 +110,15 @@ impl CoverArt {
   }
 
   pub fn render(&self, f: &mut Frame, area: Rect) {
-    let mut lock = self.state.lock().unwrap();
+    Self::render_state(&self.state, f, area);
+  }
+
+  pub fn render_fullscreen(&self, f: &mut Frame, area: Rect) {
+    Self::render_state(&self.fullscreen_state, f, area);
+  }
+
+  fn render_state(state: &Mutex<Option<CoverArtState>>, f: &mut Frame, area: Rect) {
+    let mut lock = state.lock().unwrap();
     if let Some(sp) = lock.as_mut() {
       f.render_stateful_widget(
         StatefulImage::new().resize(Resize::Fit(None)),

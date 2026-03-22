@@ -231,7 +231,8 @@ pub enum ActiveBlock {
   TrackTable,
   Discover,
   Artists,
-  BasicView,
+  LyricsView,
+  CoverArtView,
   Dialog(DialogContext),
 
   AnnouncementPrompt,
@@ -248,7 +249,8 @@ pub enum RouteId {
   AlbumTracks,
   AlbumList,
   Artist,
-  BasicView,
+  LyricsView,
+  CoverArtView,
   Error,
   Home,
   RecentlyPlayed,
@@ -3081,10 +3083,17 @@ impl App {
           value: SettingValue::Key(key_to_string(&self.user_config.keys.audio_analysis)),
         },
         SettingItem {
-          id: "keys.basic_view".to_string(),
-          name: "Basic View".to_string(),
-          description: "Open lyrics/basic view".to_string(),
-          value: SettingValue::Key(key_to_string(&self.user_config.keys.basic_view)),
+          id: "keys.lyrics_view".to_string(),
+          name: "Lyrics View".to_string(),
+          description: "Open lyrics view".to_string(),
+          value: SettingValue::Key(key_to_string(&self.user_config.keys.lyrics_view)),
+        },
+        #[cfg(feature = "cover-art")]
+        SettingItem {
+          id: "keys.cover_art_view".to_string(),
+          name: "Cover Art View".to_string(),
+          description: "Open full-screen cover art view".to_string(),
+          value: SettingValue::Key(key_to_string(&self.user_config.keys.cover_art_view)),
         },
       ],
       SettingsCategory::Theme => {
@@ -3490,10 +3499,18 @@ impl App {
             }
           }
         }
-        "keys.basic_view" => {
+        "keys.lyrics_view" => {
           if let SettingValue::Key(v) = &setting.value {
             if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
-              self.user_config.keys.basic_view = key;
+              self.user_config.keys.lyrics_view = key;
+            }
+          }
+        }
+        #[cfg(feature = "cover-art")]
+        "keys.cover_art_view" => {
+          if let SettingValue::Key(v) = &setting.value {
+            if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
+              self.user_config.keys.cover_art_view = key;
             }
           }
         }

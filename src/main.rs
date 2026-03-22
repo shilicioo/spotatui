@@ -2522,8 +2522,12 @@ async fn start_ui(
         ActiveBlock::Analysis => {
           ui::audio_analysis::draw(f, &app);
         }
-        ActiveBlock::BasicView => {
-          ui::draw_basic_view(f, &app);
+        ActiveBlock::LyricsView => {
+          ui::draw_lyrics_view(f, &app);
+        }
+        #[cfg(feature = "cover-art")]
+        ActiveBlock::CoverArtView => {
+          ui::draw_cover_art_view(f, &app);
         }
 
         ActiveBlock::AnnouncementPrompt => {
@@ -2837,7 +2841,9 @@ async fn start_ui(
           ActiveBlock::Error => ui::draw_error_screen(f, &app),
           ActiveBlock::SelectDevice => ui::draw_device_list(f, &app),
           ActiveBlock::Analysis => ui::audio_analysis::draw(f, &app),
-          ActiveBlock::BasicView => ui::draw_basic_view(f, &app),
+          ActiveBlock::LyricsView => ui::draw_lyrics_view(f, &app),
+          #[cfg(feature = "cover-art")]
+          ActiveBlock::CoverArtView => ui::draw_cover_art_view(f, &app),
 
           ActiveBlock::AnnouncementPrompt => ui::draw_announcement_prompt(f, &app),
           ActiveBlock::ExitPrompt => ui::draw_exit_prompt(f, &app),
