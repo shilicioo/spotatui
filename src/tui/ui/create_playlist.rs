@@ -60,6 +60,10 @@ fn draw_name_stage(f: &mut Frame<'_>, app: &App, area: Rect) {
       .border_style(Style::default().fg(theme.active)),
   );
   f.render_widget(input, inner[1]);
+  f.set_cursor_position((
+    inner[1].x + 1 + app.create_playlist_name_cursor,
+    inner[1].y + 1,
+  ));
 
   let hint = Paragraph::new("Press Enter to continue, Esc to cancel")
     .style(Style::default().fg(theme.inactive));
@@ -109,6 +113,12 @@ fn draw_add_tracks_stage(f: &mut Frame<'_>, app: &App, area: Rect) {
       .border_style(search_border_style),
   );
   f.render_widget(search_input, inner[0]);
+  if app.create_playlist_focus == CreatePlaylistFocus::SearchInput {
+    f.set_cursor_position((
+      inner[0].x + 1 + app.create_playlist_search_cursor,
+      inner[0].y + 1,
+    ));
+  }
 
   // Two-panel area: results + added tracks
   let panels = Layout::default()

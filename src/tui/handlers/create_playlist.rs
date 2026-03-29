@@ -81,13 +81,16 @@ fn handle_search_input(key: Key, app: &mut App) {
     }
     Key::Tab => {
       if !app.create_playlist_tracks.is_empty() {
+        app.create_playlist_selected_result = 0;
         app.create_playlist_focus = CreatePlaylistFocus::AddedTracks;
       } else if !app.create_playlist_search_results.is_empty() {
+        app.create_playlist_selected_result = 0;
         app.create_playlist_focus = CreatePlaylistFocus::SearchResults;
       }
     }
     Key::Down => {
       if !app.create_playlist_search_results.is_empty() {
+        app.create_playlist_selected_result = 0;
         app.create_playlist_focus = CreatePlaylistFocus::SearchResults;
       }
     }
@@ -155,6 +158,7 @@ fn handle_results_nav(key: Key, app: &mut App) {
     }
     Key::Tab => {
       if !app.create_playlist_tracks.is_empty() {
+        app.create_playlist_selected_result = 0;
         app.create_playlist_focus = CreatePlaylistFocus::AddedTracks;
       } else {
         app.create_playlist_focus = CreatePlaylistFocus::SearchInput;
@@ -168,7 +172,7 @@ fn handle_added_tracks_nav(key: Key, app: &mut App) {
   let count = app.create_playlist_tracks.len();
   match key {
     Key::Esc => {
-      close_form(app);
+      app.create_playlist_focus = CreatePlaylistFocus::SearchInput;
     }
     Key::Tab => {
       app.create_playlist_focus = CreatePlaylistFocus::SearchInput;

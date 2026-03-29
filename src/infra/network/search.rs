@@ -172,7 +172,11 @@ impl SearchNetwork for Network {
         .into_iter()
         .filter_map(|t| if t.id.is_some() { Some(t) } else { None })
         .collect::<Vec<_>>(),
-      _ => return,
+      Ok(_) => return,
+      Err(e) => {
+        self.handle_error(anyhow!(e)).await;
+        return;
+      }
     };
 
     let mut app = self.app.lock().await;
