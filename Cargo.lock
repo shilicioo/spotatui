@@ -5939,9 +5939,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui-bar-graph"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97505cbb8633edb0f727724b72a71dec4b810499cdbda7c10727b57e83581950"
+checksum = "f3168da5babd2b6ada727e5b714cde4e8a4021443f746ff222a9435073e77d60"
 dependencies = [
  "colorgrad",
  "ratatui-core",

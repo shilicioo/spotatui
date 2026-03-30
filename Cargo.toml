@@ -34,7 +34,7 @@ backtrace = "0.3.76"
 arboard = "3.4"
 crossterm = "0.29"
 tui-equalizer = "0.2.0-alpha"
-tui-bar-graph = "0.3.1"
+tui-bar-graph = "0.3.2"
 colorgrad = "0.8.0"
 tokio = { version = "1.50", features = ["full"] }
 rand = "0.8.4"
