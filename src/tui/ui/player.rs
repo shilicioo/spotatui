@@ -1,6 +1,9 @@
-use crate::core::app::{ActiveBlock, App};
+use crate::core::{
+  app::{ActiveBlock, App},
+  layout::fullscreen_view_layout,
+};
 use ratatui::{
-  layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
+  layout::{Alignment, Constraint, Layout, Position, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span, Text},
   widgets::{
@@ -15,7 +18,6 @@ use rspotify::prelude::Id;
 
 use super::util::{
   create_artist_string, display_track_progress, get_color, get_track_progress_percentage,
-  FULLSCREEN_VIEW_PLAYBAR_HEIGHT,
 };
 
 const PLAYBAR_CONTROLS: [PlaybarControl; 8] = [
@@ -246,31 +248,32 @@ fn draw_playbar_controls(f: &mut Frame<'_>, app: &App, playbar_area: Rect) {
   }
 }
 
-pub fn draw_lyrics_view(f: &mut Frame<'_>, app: &App) {
-  let chunks = Layout::default()
-    .direction(Direction::Vertical)
-    .constraints([
-      Constraint::Min(0), // Lyrics Area taking all available space above
-      Constraint::Length(FULLSCREEN_VIEW_PLAYBAR_HEIGHT), // Playbar at the bottom
-    ])
-    .split(f.area());
+fn center_rect_within(bounds: Rect, size: Rect) -> Rect {
+  Rect {
+    x: bounds.x + bounds.width.saturating_sub(size.width.min(bounds.width)) / 2,
+    y: bounds.y + bounds.height.saturating_sub(size.height.min(bounds.height)) / 2,
+    width: size.width.min(bounds.width),
+    height: size.height.min(bounds.height),
+  }
+}
 
-  draw_lyrics(f, app, chunks[0]);
-  draw_playbar(f, app, chunks[1]);
+pub fn draw_lyrics_view(f: &mut Frame<'_>, app: &App) {
+  let (content_area, playbar_area) = fullscreen_view_layout(&app.user_config.behavior, f.area());
+
+  draw_lyrics(f, app, content_area);
+  if let Some(playbar_area) = playbar_area {
+    draw_playbar(f, app, playbar_area);
+  }
 }
 
 #[cfg(feature = "cover-art")]
 pub fn draw_cover_art_view(f: &mut Frame<'_>, app: &App) {
-  let chunks = Layout::default()
-    .direction(Direction::Vertical)
-    .constraints([
-      Constraint::Min(0),
-      Constraint::Length(FULLSCREEN_VIEW_PLAYBAR_HEIGHT),
-    ])
-    .split(f.area());
+  let (content_area, playbar_area) = fullscreen_view_layout(&app.user_config.behavior, f.area());
 
-  draw_cover_art_content(f, app, chunks[0]);
-  draw_playbar(f, app, chunks[1]);
+  draw_cover_art_content(f, app, content_area);
+  if let Some(playbar_area) = playbar_area {
+    draw_playbar(f, app, playbar_area);
+  }
 }
 
 #[cfg(feature = "cover-art")]
@@ -299,42 +302,36 @@ fn draw_cover_art_content(f: &mut Frame<'_>, app: &App, area: Rect) {
     return;
   }
 
-  // Reserve 3 rows at the bottom for song info (1 blank + 1 title + 1 artist)
-  let info_height = 3_u16;
-  let img_area_height = area.height.saturating_sub(info_height);
-
-  // Calculate image dimensions for a square album cover
-  // Terminal characters are taller than wide, so we use a ratio to get a square.
-  let char_aspect_ratio = 1.9_f32;
-
-  let max_height = img_area_height.saturating_sub(2);
-  let max_width = area.width.saturating_sub(2);
-
-  let img_width_from_height = ((max_height as f32) * char_aspect_ratio).ceil() as u16;
-
-  let (img_width, img_height) = if img_width_from_height > max_width {
-    let h = ((max_width as f32) / char_aspect_ratio).floor() as u16;
-    (max_width, h)
+  let show_title = track_name.is_some();
+  let show_artist = show_title && artist_str.is_some();
+  let info_height = if show_title {
+    1 + 1 + u16::from(show_artist)
   } else {
-    (img_width_from_height, max_height)
+    0
   };
-
-  // Center the image horizontally, vertically within the image area
-  let x = area.x + (area.width.saturating_sub(img_width)) / 2;
-  let y = area.y + (img_area_height.saturating_sub(img_height)) / 2;
-
-  let centered_area = Rect {
-    x,
-    y,
-    width: img_width,
-    height: img_height,
+  let image_bounds = Rect {
+    x: area.x,
+    y: area.y,
+    width: area.width,
+    height: area.height.saturating_sub(info_height),
   };
+  let available_image_size = Rect::new(
+    0,
+    0,
+    image_bounds.width.saturating_sub(2),
+    image_bounds.height.saturating_sub(2),
+  );
+  let fitted_image_size = app
+    .cover_art
+    .fullscreen_size_for(available_image_size)
+    .unwrap_or(available_image_size);
+  let centered_area = center_rect_within(image_bounds, fitted_image_size);
 
   app.cover_art.render_fullscreen(f, centered_area);
 
   // Draw song info below the cover art
   if let Some(name) = track_name {
-    let title_y = y + img_height + 1;
+    let title_y = centered_area.y + centered_area.height + 1;
     if title_y < area.y + area.height {
       let title = Paragraph::new(name)
         .style(
@@ -824,5 +821,13 @@ mod tests {
       hitboxes[PLAYBAR_CONTROLS.len() - 1].control,
       PlaybarControl::VolumeUp
     );
+  }
+
+  #[test]
+  fn center_rect_within_centers_smaller_rect() {
+    let bounds = Rect::new(10, 20, 100, 50);
+    let size = Rect::new(0, 0, 80, 40);
+
+    assert_eq!(center_rect_within(bounds, size), Rect::new(20, 25, 80, 40));
   }
 }

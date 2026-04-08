@@ -2,12 +2,12 @@ use super::{library, playbar, playlist, settings, track_table};
 use crate::core::app::{
   ActiveBlock, App, RouteId, SettingValue, SettingsCategory, LIBRARY_OPTIONS,
 };
-use crate::core::layout::{library_constraints, playbar_constraint, sidebar_constraints};
+use crate::core::layout::{
+  fullscreen_view_layout, library_constraints, playbar_constraint, sidebar_constraints,
+};
 use crate::tui::event::Key;
 use crate::tui::ui::player::playbar_control_at;
-use crate::tui::ui::util::{
-  get_main_layout_margin, FULLSCREEN_VIEW_PLAYBAR_HEIGHT, SMALL_TERMINAL_WIDTH,
-};
+use crate::tui::ui::util::{get_main_layout_margin, SMALL_TERMINAL_WIDTH};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -709,12 +709,8 @@ fn fullscreen_view_playbar_area(app: &App) -> Option<Rect> {
   }
 
   let root = Rect::new(0, 0, app.size.width, app.size.height);
-  let [_lyrics_area, playbar_area] = root.layout(&Layout::vertical([
-    Constraint::Min(0),
-    Constraint::Length(FULLSCREEN_VIEW_PLAYBAR_HEIGHT),
-  ]));
-
-  Some(playbar_area)
+  let (_, playbar_area) = fullscreen_view_layout(&app.user_config.behavior, root);
+  playbar_area
 }
 
 fn main_layout_areas(app: &App) -> Option<MainLayoutAreas> {
@@ -1097,6 +1093,60 @@ mod tests {
     assert_eq!(route.id, RouteId::LyricsView);
     assert_eq!(route.active_block, ActiveBlock::LyricsView);
     assert_eq!(route.hovered_block, ActiveBlock::LyricsView);
+  }
+
+  #[test]
+  fn fullscreen_view_playbar_area_uses_configured_height() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.user_config.behavior.playbar_height_rows = 8;
+
+    let playbar_area = fullscreen_view_playbar_area(&app).expect("fullscreen playbar area");
+
+    assert_eq!(playbar_area, Rect::new(0, 42, 160, 8));
+  }
+
+  #[test]
+  fn fullscreen_view_playbar_area_is_hidden_when_height_is_zero() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.user_config.behavior.playbar_height_rows = 0;
+
+    assert!(fullscreen_view_playbar_area(&app).is_none());
+  }
+
+  #[test]
+  fn click_hidden_lyrics_view_playbar_area_does_nothing() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.user_config.behavior.playbar_height_rows = 0;
+    app.push_navigation_stack(RouteId::LyricsView, ActiveBlock::LyricsView);
+    with_playbar_context(&mut app);
+
+    let (initial_route_id, initial_active_block, initial_hovered_block) = {
+      let route = app.get_current_route();
+      (route.id.clone(), route.active_block, route.hovered_block)
+    };
+
+    handler(
+      mouse_event(MouseEventKind::Down(MouseButton::Left), 80, 49),
+      &mut app,
+    );
+
+    assert!(!app.is_loading);
+    let route = app.get_current_route();
+    assert_eq!(route.id, initial_route_id);
+    assert_eq!(route.active_block, initial_active_block);
+    assert_eq!(route.hovered_block, initial_hovered_block);
   }
 
   #[test]

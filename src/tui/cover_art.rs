@@ -117,6 +117,10 @@ impl CoverArt {
     Self::render_state(&self.fullscreen_state, f, area);
   }
 
+  pub fn fullscreen_size_for(&self, area: Rect) -> Option<Rect> {
+    Self::size_for_state(&self.fullscreen_state, area)
+  }
+
   fn render_state(state: &Mutex<Option<CoverArtState>>, f: &mut Frame, area: Rect) {
     let mut lock = state.lock().unwrap();
     if let Some(sp) = lock.as_mut() {
@@ -126,5 +130,12 @@ impl CoverArt {
         &mut sp.image,
       );
     }
+  }
+
+  fn size_for_state(state: &Mutex<Option<CoverArtState>>, area: Rect) -> Option<Rect> {
+    let lock = state.lock().unwrap();
+    lock
+      .as_ref()
+      .map(|sp| sp.image.size_for(Resize::Fit(None), area))
   }
 }

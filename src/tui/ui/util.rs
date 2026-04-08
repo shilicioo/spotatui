@@ -10,7 +10,6 @@ use ratatui::{
 use rspotify::model::artist::SimplifiedArtist;
 use std::time::Duration;
 
-pub const FULLSCREEN_VIEW_PLAYBAR_HEIGHT: u16 = 6;
 pub const SMALL_TERMINAL_WIDTH: u16 = 150;
 pub const SMALL_TERMINAL_HEIGHT: u16 = 45;
 

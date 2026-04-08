@@ -1,5 +1,5 @@
 use crate::core::user_config::BehaviorConfig;
-use ratatui::layout::Constraint;
+use ratatui::layout::{Constraint, Layout, Rect};
 
 /// Returns horizontal constraints for the [sidebar, content] split based on config.
 /// When sidebar_width_percent is 0, the sidebar is hidden (zero length).
@@ -27,6 +27,25 @@ pub fn library_constraints(behavior: &BehaviorConfig) -> [Constraint; 2] {
     Constraint::Percentage(library),
     Constraint::Percentage(playlists),
   ]
+}
+
+/// Returns the fullscreen content/playbar split used by lyrics and cover-art views.
+///
+/// When `playbar_height_rows` is 0, the playbar is hidden and the content area fills the screen.
+pub fn fullscreen_view_layout(behavior: &BehaviorConfig, area: Rect) -> (Rect, Option<Rect>) {
+  if behavior.playbar_height_rows == 0 {
+    return (area, None);
+  }
+
+  let chunks = Layout::vertical([
+    Constraint::Min(0),
+    Constraint::Length(behavior.playbar_height_rows),
+  ])
+  .split(area);
+  let content_area = chunks[0];
+  let playbar_area = chunks[1];
+
+  (content_area, Some(playbar_area))
 }
 
 #[cfg(test)]
@@ -119,5 +138,27 @@ mod tests {
     let [lib, playlists] = library_constraints(&b);
     assert_eq!(lib, Constraint::Percentage(100));
     assert_eq!(playlists, Constraint::Percentage(0));
+  }
+
+  #[test]
+  fn fullscreen_layout_hides_playbar_when_height_is_zero() {
+    let b = make_behavior_with(20, 0);
+    let area = Rect::new(2, 4, 80, 24);
+
+    let (content, playbar) = fullscreen_view_layout(&b, area);
+
+    assert_eq!(content, area);
+    assert!(playbar.is_none());
+  }
+
+  #[test]
+  fn fullscreen_layout_splits_content_and_playbar_when_height_is_set() {
+    let b = make_behavior_with(20, 6);
+    let area = Rect::new(2, 4, 80, 24);
+
+    let (content, playbar) = fullscreen_view_layout(&b, area);
+
+    assert_eq!(content, Rect::new(2, 4, 80, 18));
+    assert_eq!(playbar, Some(Rect::new(2, 22, 80, 6)));
   }
 }

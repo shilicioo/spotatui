@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Fullscreen playbar resizing**: `LyricsView` and `CoverArtView` now honor the existing playbar height setting, so the lower player can be resized or fully hidden with the same keybindings used on the main screen (fixes [#208](https://github.com/LargeModGames/spotatui/issues/208)).
+
 ### Fixed
 
+- **Hidden fullscreen cover-art centering**: Fixed the fullscreen cover art image rendering slightly off-center when the playbar was completely hidden.
 - **Volume display glitch on rapid changes**: Fixed the volume percentage briefly reverting to an old value after the user changed it, especially noticeable when spamming volume up/down. The UI now always shows the user's intended volume until Spotify's API confirms it matches.
 
 ## [v0.38.0] - 2026-03-23
