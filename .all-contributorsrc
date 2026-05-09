@@ -258,6 +258,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "rlpratyoosh",
+      "name": "Pratyoosh Prakash",
+      "avatar_url": "https://avatars.githubusercontent.com/u/170789120?v=4",
+      "profile": "http://www.pratyoosh.me",
+      "contributions": [
+        "code",
+        "bug"
+      ]
     }
   ],
   "contributorsPerLine": 7,
