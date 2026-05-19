@@ -3072,6 +3072,15 @@ impl App {
           description: "Force rendering of cover art despite terminal support".to_string(),
           value: SettingValue::Bool(self.user_config.behavior.draw_cover_art_forced),
         },
+        #[cfg(feature = "cover-art")]
+        SettingItem {
+          id: "behavior.playbar_cover_art_size_percent".to_string(),
+          name: "Cover Art Size".to_string(),
+          description: "Playbar cover art size as a percentage (25-200)".to_string(),
+          value: SettingValue::Number(
+            self.user_config.behavior.playbar_cover_art_size_percent as i64,
+          ),
+        },
       ],
       SettingsCategory::Keybindings => vec![
         SettingItem {
@@ -3487,6 +3496,13 @@ impl App {
         "behavior.draw_cover_art_forced" => {
           if let SettingValue::Bool(v) = setting.value {
             self.user_config.behavior.draw_cover_art_forced = v;
+          }
+        }
+        #[cfg(feature = "cover-art")]
+        "behavior.playbar_cover_art_size_percent" => {
+          if let SettingValue::Number(v) = setting.value {
+            self.user_config.behavior.playbar_cover_art_size_percent =
+              crate::core::user_config::normalize_playbar_cover_art_size_percent(v);
           }
         }
         // Keybindings

@@ -30,6 +30,12 @@ const PLAYBAR_CONTROLS: [PlaybarControl; 8] = [
   PlaybarControl::VolumeDown,
   PlaybarControl::VolumeUp,
 ];
+#[cfg(feature = "cover-art")]
+const COVER_ART_CELL_RATIO: f32 = 1.9;
+#[cfg(feature = "cover-art")]
+const PLAYBAR_TRACK_INFO_ROWS: u16 = 2;
+#[cfg(feature = "cover-art")]
+const PLAYBAR_PROGRESS_ROWS: u16 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PlaybarControl {
@@ -73,6 +79,14 @@ struct PlaybarLayoutAreas {
   cover_art: Option<Rect>,
 }
 
+#[cfg(feature = "cover-art")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PlaybarCoverLayout {
+  text_area: Rect,
+  slot: Rect,
+  image_area: Rect,
+}
+
 fn split_playbar_rows(area: Rect) -> (Rect, Rect, Rect) {
   if area.width == 0 || area.height == 0 {
     let empty = Rect::new(area.x, area.y, area.width, 0);
@@ -112,22 +126,21 @@ fn playbar_layout_areas(app: &App, layout_chunk: Rect) -> PlaybarLayoutAreas {
       .user_config
       .do_draw_cover_art(app.cover_art.full_image_support())
     {
-      if app.cover_art.available() {
-        let height = other.height;
-        // we need to allocate a square portion of layout_chunk, but terminal characters aren't
-        // square!
+      let cover_layout = playbar_cover_layout(
+        other,
+        app.user_config.behavior.playbar_cover_art_size_percent,
+      );
+      if let Some(rendered_size) = app.cover_art.size_for(cover_layout.image_area) {
+        let cover_layout = cover_layout.with_rendered_size(rendered_size);
+        let (artist_area, controls_area, progress_area) =
+          split_cover_playbar_rows(other, cover_layout.text_area, cover_layout.image_area);
 
-        // totally arbitrary
-        let ratio = 1.9;
-        // we ceil rather than simply casting for using the full height of the area
-        let width = ((height as f32) * ratio).ceil() as u16;
-        let [cover_art, _, other] = other.layout(&Layout::horizontal([
-          Constraint::Length(width),
-          Constraint::Length(1),
-          Constraint::Percentage(100),
-        ]));
-
-        (other, Some(cover_art))
+        return PlaybarLayoutAreas {
+          artist_area,
+          controls_area,
+          progress_area,
+          cover_art: Some(cover_layout.image_area),
+        };
       } else {
         (other, None)
       }
@@ -159,19 +172,155 @@ fn playbar_layout_areas(app: &App, layout_chunk: Rect) -> PlaybarLayoutAreas {
   }
 }
 
+#[cfg(feature = "cover-art")]
+fn playbar_cover_layout(inner: Rect, size_percent: u16) -> PlaybarCoverLayout {
+  let size_percent = crate::core::user_config::clamp_playbar_cover_art_size_percent(size_percent);
+  let image_height = scaled_cover_art_height(inner.height, size_percent);
+  let requested_width = ((image_height as f32) * COVER_ART_CELL_RATIO).ceil() as u16;
+  let max_slot_width = if inner.width > 2 {
+    inner.width.saturating_sub(2)
+  } else {
+    inner.width
+  };
+  let slot_width = requested_width.min(max_slot_width);
+  let separator_width = u16::from(slot_width > 0 && inner.width > slot_width);
+
+  let slot = Rect::new(inner.x, inner.y, slot_width, inner.height);
+  let text_x = inner
+    .x
+    .saturating_add(slot_width.saturating_add(separator_width));
+  let text_width = inner
+    .width
+    .saturating_sub(slot_width.saturating_add(separator_width));
+  let text_area = Rect::new(text_x, inner.y, text_width, inner.height);
+  let image_area = center_rect_within(
+    slot,
+    Rect::new(0, 0, requested_width.min(slot_width), image_height),
+  );
+
+  PlaybarCoverLayout {
+    text_area,
+    slot,
+    image_area,
+  }
+}
+
+#[cfg(feature = "cover-art")]
+fn scaled_cover_art_height(available_height: u16, size_percent: u16) -> u16 {
+  if available_height == 0 {
+    return 0;
+  }
+
+  let size_percent = crate::core::user_config::clamp_playbar_cover_art_size_percent(size_percent);
+  let target_percent = if size_percent <= 100 {
+    25 + ((size_percent.saturating_sub(25) as u32 * 35).saturating_add(74) / 75) as u16
+  } else {
+    60 + (((size_percent - 100) as u32 * 40).saturating_add(99) / 100) as u16
+  };
+
+  (((available_height as u32 * target_percent as u32).saturating_add(99) / 100) as u16)
+    .clamp(1, available_height)
+}
+
+#[cfg(feature = "cover-art")]
+impl PlaybarCoverLayout {
+  fn with_rendered_size(self, rendered_size: Rect) -> Self {
+    Self {
+      image_area: bottom_aligned_rect_within(self.image_area, rendered_size),
+      ..self
+    }
+  }
+}
+
+#[cfg(feature = "cover-art")]
+fn bottom_aligned_rect_within(bounds: Rect, size: Rect) -> Rect {
+  let width = size.width.min(bounds.width);
+  let height = size.height.min(bounds.height);
+
+  Rect {
+    x: bounds.x + bounds.width.saturating_sub(width) / 2,
+    y: bounds.y + bounds.height.saturating_sub(height),
+    width,
+    height,
+  }
+}
+
+#[cfg(feature = "cover-art")]
+fn split_cover_playbar_rows(inner: Rect, text_area: Rect, image_area: Rect) -> (Rect, Rect, Rect) {
+  if inner.width == 0 || inner.height == 0 || text_area.width == 0 || text_area.height == 0 {
+    let empty = Rect::new(text_area.x, text_area.y, text_area.width, 0);
+    return (empty, empty, empty);
+  }
+
+  let progress_y = inner
+    .y
+    .saturating_add(inner.height.saturating_sub(PLAYBAR_PROGRESS_ROWS));
+  let image_bottom = image_area.y.saturating_add(image_area.height);
+  let progress_area = if image_bottom <= progress_y {
+    Rect::new(inner.x, progress_y, inner.width, PLAYBAR_PROGRESS_ROWS)
+  } else {
+    Rect::new(
+      text_area.x,
+      progress_y,
+      text_area.width,
+      PLAYBAR_PROGRESS_ROWS,
+    )
+  };
+
+  let controls_area = cover_playbar_controls_area(inner, text_area, image_area, progress_area);
+  let artist_area = cover_playbar_artist_area(text_area, image_area, controls_area, progress_area);
+
+  (artist_area, controls_area, progress_area)
+}
+
+#[cfg(feature = "cover-art")]
+fn cover_playbar_controls_area(
+  inner: Rect,
+  text_area: Rect,
+  image_area: Rect,
+  progress_area: Rect,
+) -> Rect {
+  let required_width = playbar_controls_required_width();
+  let controls_y = progress_area.y.saturating_sub(1);
+  let image_bottom = image_area.y.saturating_add(image_area.height);
+
+  if image_bottom <= controls_y && inner.width >= required_width {
+    return Rect::new(inner.x, controls_y, inner.width, 1);
+  }
+
+  let artist_y = image_area.y.max(text_area.y);
+  let available_text_rows = controls_y.saturating_sub(artist_y);
+  if text_area.width >= required_width && available_text_rows >= PLAYBAR_TRACK_INFO_ROWS {
+    Rect::new(text_area.x, controls_y, text_area.width, 1)
+  } else {
+    Rect::new(text_area.x, text_area.y, text_area.width, 0)
+  }
+}
+
+#[cfg(feature = "cover-art")]
+fn cover_playbar_artist_area(
+  text_area: Rect,
+  image_area: Rect,
+  controls_area: Rect,
+  progress_area: Rect,
+) -> Rect {
+  let y = image_area.y.max(text_area.y);
+  let bottom = if controls_area.height > 0 {
+    controls_area.y
+  } else {
+    progress_area.y
+  };
+  let height = bottom.saturating_sub(y).min(PLAYBAR_TRACK_INFO_ROWS);
+
+  Rect::new(text_area.x, y, text_area.width, height)
+}
+
 fn playbar_control_hitboxes_in_area(controls_area: Rect) -> Vec<PlaybarControlHitbox> {
   if controls_area.width == 0 || controls_area.height == 0 {
     return Vec::new();
   }
 
-  let mut required_width = 0u16;
-  for (idx, control) in PLAYBAR_CONTROLS.iter().enumerate() {
-    if idx > 0 {
-      required_width = required_width.saturating_add(1);
-    }
-    required_width = required_width.saturating_add(control.button_label().len() as u16);
-  }
-
+  let required_width = playbar_controls_required_width();
   let start_x = if controls_area.width > required_width {
     controls_area
       .x
@@ -205,6 +354,17 @@ fn playbar_control_hitboxes_in_area(controls_area: Rect) -> Vec<PlaybarControlHi
   hitboxes
 }
 
+fn playbar_controls_required_width() -> u16 {
+  PLAYBAR_CONTROLS
+    .iter()
+    .enumerate()
+    .fold(0u16, |width, (idx, control)| {
+      width
+        .saturating_add(u16::from(idx > 0))
+        .saturating_add(control.button_label().len() as u16)
+    })
+}
+
 pub(crate) fn playbar_control_hitboxes(
   app: &App,
   playbar_area: Rect,
@@ -236,15 +396,11 @@ pub(crate) fn playbar_control_at(
     .find_map(|(control, rect)| rect.contains(Position { x, y }).then_some(control))
 }
 
-fn draw_playbar_controls(f: &mut Frame<'_>, app: &App, playbar_area: Rect) {
+fn draw_playbar_controls(f: &mut Frame<'_>, app: &App, controls_area: Rect) {
   let controls_style = Style::default().fg(app.user_config.theme.playbar_text);
-  for (control, rect) in playbar_control_hitboxes(app, playbar_area) {
-    debug_assert_eq!(
-      playbar_control_at(app, playbar_area, rect.x, rect.y),
-      Some(control)
-    );
-    let control = Paragraph::new(Span::styled(control.button_label(), controls_style));
-    f.render_widget(control, rect);
+  for hitbox in playbar_control_hitboxes_in_area(controls_area) {
+    let control = Paragraph::new(Span::styled(hitbox.control.button_label(), controls_style));
+    f.render_widget(control, hitbox.rect);
   }
 }
 
@@ -633,7 +789,7 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
           )),
         );
       f.render_widget(artist, artist_area);
-      draw_playbar_controls(f, app, layout_chunk);
+      draw_playbar_controls(f, app, playbar_areas.controls_area);
 
       let progress_ms = match app.seek_ms {
         Some(seek_ms) => seek_ms,
@@ -700,13 +856,8 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
       }
 
       #[cfg(feature = "cover-art")]
-      if app
-        .user_config
-        .do_draw_cover_art(app.cover_art.full_image_support())
-      {
-        if let Some(cover_art) = playbar_areas.cover_art {
-          app.cover_art.render(f, cover_art);
-        }
+      if let Some(cover_art) = playbar_areas.cover_art {
+        app.cover_art.render(f, cover_art);
       }
 
       drew_playbar = true;
@@ -831,5 +982,113 @@ mod tests {
     let size = Rect::new(0, 0, 80, 40);
 
     assert_eq!(center_rect_within(bounds, size), Rect::new(20, 25, 80, 40));
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn playbar_cover_layout_uses_default_slot_width() {
+    let layout = playbar_cover_layout(Rect::new(2, 3, 100, 4), 100);
+
+    assert_eq!(layout.slot, Rect::new(2, 3, 6, 4));
+    assert_eq!(layout.image_area, Rect::new(2, 3, 6, 3));
+    assert_eq!(layout.text_area, Rect::new(9, 3, 93, 4));
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn playbar_cover_layout_centers_rendered_image_in_slot() {
+    let layout =
+      playbar_cover_layout(Rect::new(2, 3, 100, 6), 200).with_rendered_size(Rect::new(0, 0, 8, 4));
+
+    assert_eq!(layout.slot, Rect::new(2, 3, 12, 6));
+    assert_eq!(layout.image_area, Rect::new(4, 5, 8, 4));
+    assert_eq!(layout.text_area, Rect::new(15, 3, 87, 6));
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn playbar_cover_layout_bottom_aligns_smaller_rendered_image_at_max_size() {
+    let layout =
+      playbar_cover_layout(Rect::new(2, 3, 100, 4), 200).with_rendered_size(Rect::new(0, 0, 6, 3));
+
+    assert_eq!(layout.image_area, Rect::new(3, 4, 6, 3));
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn cover_playbar_progress_reclaims_the_row_below_the_cover() {
+    let inner = Rect::new(1, 3, 49, 4);
+    let text_area = Rect::new(10, 3, 40, 4);
+    let image_area = Rect::new(1, 3, 6, 3);
+    let (artist_area, controls_area, progress_area) =
+      split_cover_playbar_rows(inner, text_area, image_area);
+
+    assert_eq!(artist_area, Rect::new(10, 3, 40, 2));
+    assert_eq!(controls_area, Rect::new(10, 3, 40, 0));
+    assert_eq!(progress_area, Rect::new(1, 6, 49, 1));
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn cover_playbar_progress_stays_beside_a_full_height_cover() {
+    let inner = Rect::new(1, 3, 49, 4);
+    let text_area = Rect::new(10, 3, 40, 4);
+    let image_area = Rect::new(1, 3, 8, 4);
+    let (artist_area, controls_area, progress_area) =
+      split_cover_playbar_rows(inner, text_area, image_area);
+
+    assert_eq!(artist_area, Rect::new(10, 3, 40, 2));
+    assert_eq!(controls_area, Rect::new(10, 3, 40, 0));
+    assert_eq!(progress_area, Rect::new(10, 6, 40, 1));
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn cover_playbar_rows_reserve_full_width_controls_below_the_cover() {
+    let inner = Rect::new(1, 3, 109, 6);
+    let text_area = Rect::new(14, 3, 96, 6);
+    let image_area = Rect::new(1, 3, 10, 4);
+    let (artist_area, controls_area, progress_area) =
+      split_cover_playbar_rows(inner, text_area, image_area);
+
+    assert_eq!(artist_area, Rect::new(14, 3, 96, 2));
+    assert_eq!(controls_area, Rect::new(1, 7, 109, 1));
+    assert_eq!(progress_area, Rect::new(1, 8, 109, 1));
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn playbar_cover_layout_scales_smaller_and_larger_sizes() {
+    let smaller = playbar_cover_layout(Rect::new(0, 0, 100, 4), 50);
+    let larger = playbar_cover_layout(Rect::new(0, 0, 100, 4), 200);
+
+    assert_eq!(smaller.slot.width, 4);
+    assert_eq!(smaller.text_area, Rect::new(5, 0, 95, 4));
+    assert_eq!(larger.slot.width, 8);
+    assert_eq!(larger.text_area, Rect::new(9, 0, 91, 4));
+    assert_eq!(smaller.image_area.height, 2);
+    assert_eq!(larger.image_area.height, 4);
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn scaled_cover_art_height_maps_200_to_full_available_height() {
+    assert_eq!(scaled_cover_art_height(5, 25), 2);
+    assert_eq!(scaled_cover_art_height(5, 100), 3);
+    assert_eq!(scaled_cover_art_height(5, 200), 5);
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn playbar_cover_layout_clamps_to_tiny_playbar_area() {
+    let layout = playbar_cover_layout(Rect::new(0, 0, 10, 6), 200);
+
+    assert_eq!(layout.slot, Rect::new(0, 0, 8, 6));
+    assert_eq!(layout.image_area, Rect::new(0, 0, 8, 6));
+    assert_eq!(layout.text_area, Rect::new(9, 0, 1, 6));
+
+    let zero_height = playbar_cover_layout(Rect::new(4, 5, 10, 0), 100);
+    assert_eq!(zero_height.slot, Rect::new(4, 5, 0, 0));
+    assert_eq!(zero_height.text_area, Rect::new(4, 5, 10, 0));
   }
 }

@@ -10,6 +10,26 @@ use std::{
 const FILE_NAME: &str = "config.yml";
 const CONFIG_DIR: &str = ".config";
 const APP_CONFIG_DIR: &str = "spotatui";
+#[cfg(feature = "cover-art")]
+pub const MIN_PLAYBAR_COVER_ART_SIZE_PERCENT: u16 = 25;
+#[cfg(feature = "cover-art")]
+pub const MAX_PLAYBAR_COVER_ART_SIZE_PERCENT: u16 = 200;
+
+#[cfg(feature = "cover-art")]
+pub fn clamp_playbar_cover_art_size_percent(value: u16) -> u16 {
+  value.clamp(
+    MIN_PLAYBAR_COVER_ART_SIZE_PERCENT,
+    MAX_PLAYBAR_COVER_ART_SIZE_PERCENT,
+  )
+}
+
+#[cfg(feature = "cover-art")]
+pub fn normalize_playbar_cover_art_size_percent(value: i64) -> u16 {
+  value.clamp(
+    MIN_PLAYBAR_COVER_ART_SIZE_PERCENT as i64,
+    MAX_PLAYBAR_COVER_ART_SIZE_PERCENT as i64,
+  ) as u16
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct UserTheme {
@@ -670,6 +690,8 @@ pub struct BehaviorConfigString {
   pub draw_cover_art: Option<bool>,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art_forced: Option<bool>,
+  #[cfg(feature = "cover-art")]
+  pub playbar_cover_art_size_percent: Option<u16>,
   pub keepawake_enabled: Option<bool>,
 }
 
@@ -711,6 +733,8 @@ pub struct BehaviorConfig {
   pub draw_cover_art: bool,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art_forced: bool,
+  #[cfg(feature = "cover-art")]
+  pub playbar_cover_art_size_percent: u16,
   pub keepawake_enabled: bool,
 }
 
@@ -827,6 +851,8 @@ impl UserConfig {
         draw_cover_art: true,
         #[cfg(feature = "cover-art")]
         draw_cover_art_forced: false,
+        #[cfg(feature = "cover-art")]
+        playbar_cover_art_size_percent: 100,
         keepawake_enabled: true,
       },
       path_to_config: None,
@@ -1134,6 +1160,11 @@ impl UserConfig {
     if let Some(draw_cover_art_forced) = behavior_config.draw_cover_art_forced {
       self.behavior.draw_cover_art_forced = draw_cover_art_forced;
     }
+    #[cfg(feature = "cover-art")]
+    if let Some(playbar_cover_art_size_percent) = behavior_config.playbar_cover_art_size_percent {
+      self.behavior.playbar_cover_art_size_percent =
+        clamp_playbar_cover_art_size_percent(playbar_cover_art_size_percent);
+    }
     if let Some(keepawake_enabled) = behavior_config.keepawake_enabled {
       self.behavior.keepawake_enabled = keepawake_enabled;
     }
@@ -1219,6 +1250,8 @@ impl UserConfig {
       draw_cover_art: Some(self.behavior.draw_cover_art),
       #[cfg(feature = "cover-art")]
       draw_cover_art_forced: Some(self.behavior.draw_cover_art_forced),
+      #[cfg(feature = "cover-art")]
+      playbar_cover_art_size_percent: Some(self.behavior.playbar_cover_art_size_percent),
       keepawake_enabled: Some(self.behavior.keepawake_enabled),
     };
 
@@ -1529,5 +1562,47 @@ mod tests {
     // Missing field defaults to None (not overriding the config default)
     let config: BehaviorConfigString = serde_yaml::from_str("{}").unwrap();
     assert_eq!(config.startup_behavior, None);
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn missing_playbar_cover_art_size_keeps_default() {
+    use super::{BehaviorConfigString, UserConfig};
+
+    let behavior: BehaviorConfigString = serde_yaml::from_str("{}").unwrap();
+    let mut config = UserConfig::new();
+    config.load_behaviorconfig(behavior).unwrap();
+
+    assert_eq!(config.behavior.playbar_cover_art_size_percent, 100);
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn playbar_cover_art_size_loads_from_yaml() {
+    use super::{BehaviorConfigString, UserConfig};
+
+    let behavior: BehaviorConfigString =
+      serde_yaml::from_str("playbar_cover_art_size_percent: 150").unwrap();
+    let mut config = UserConfig::new();
+    config.load_behaviorconfig(behavior).unwrap();
+
+    assert_eq!(config.behavior.playbar_cover_art_size_percent, 150);
+  }
+
+  #[cfg(feature = "cover-art")]
+  #[test]
+  fn playbar_cover_art_size_clamps_out_of_range_values() {
+    use super::{BehaviorConfigString, UserConfig};
+
+    let behavior: BehaviorConfigString =
+      serde_yaml::from_str("playbar_cover_art_size_percent: 10").unwrap();
+    let mut config = UserConfig::new();
+    config.load_behaviorconfig(behavior).unwrap();
+    assert_eq!(config.behavior.playbar_cover_art_size_percent, 25);
+
+    let behavior: BehaviorConfigString =
+      serde_yaml::from_str("playbar_cover_art_size_percent: 250").unwrap();
+    config.load_behaviorconfig(behavior).unwrap();
+    assert_eq!(config.behavior.playbar_cover_art_size_percent, 200);
   }
 }

@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use log::{debug, info};
+use log::{debug, info, warn};
 use ratatui::{
   layout::{Rect, Size},
   Frame,
@@ -33,7 +33,10 @@ impl CoverArtState {
 
 impl CoverArt {
   pub fn new() -> Self {
-    let picker = Picker::from_query_stdio().unwrap();
+    let picker = Picker::from_query_stdio().unwrap_or_else(|err| {
+      warn!("cover art renderer fallback to halfblocks: {err}");
+      Picker::halfblocks()
+    });
 
     info!(
       "cover art rendered detected a {:?} backend",
@@ -114,6 +117,10 @@ impl CoverArt {
 
   pub fn render(&self, f: &mut Frame, area: Rect) {
     Self::render_state(&self.state, f, area);
+  }
+
+  pub fn size_for(&self, area: Rect) -> Option<Rect> {
+    Self::size_for_state(&self.state, area)
   }
 
   pub fn render_fullscreen(&self, f: &mut Frame, area: Rect) {
