@@ -32,7 +32,7 @@ mod settings;
 mod sort_menu;
 mod track_table;
 
-use crate::core::app::{ActiveBlock, App, ArtistBlock, RouteId, SearchResultBlock};
+use crate::core::app::{ActiveBlock, App, ArtistBlock, InputContext, RouteId, SearchResultBlock};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
 use rspotify::model::idtypes::PlaylistId;
@@ -162,7 +162,18 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.repeat => {
       app.repeat();
     }
+    Key::Ctrl('f')
+      if app.get_current_route().active_block == ActiveBlock::TrackTable
+        && app.is_playlist_track_table_context() =>
+    {
+      app.input.clear();
+      app.input_idx = 0;
+      app.input_cursor_position = 0;
+      app.input_context = InputContext::PlaylistTrackSearch;
+      app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
+    }
     _ if key == app.user_config.keys.search => {
+      app.input_context = InputContext::GlobalSearch;
       app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
     }
     _ if key == app.user_config.keys.copy_song_url => {
@@ -467,7 +478,6 @@ fn handle_jump_to_artist_album(app: &mut App) {
 #[cfg(test)]
 mod tests {
   use super::*;
-  #[cfg(target_os = "macos")]
   use crate::core::app::TrackTableContext;
   use crate::core::test_helpers::full_track;
   use crate::core::user_config::UserConfig;
@@ -475,6 +485,7 @@ mod tests {
   use rspotify::model::{
     context::{Actions, CurrentPlaybackContext},
     enums::{DeviceType, RepeatState},
+    idtypes::PlaylistId,
     CurrentlyPlayingType, Device, PlayableId, PlayableItem,
   };
   use std::{sync::mpsc::channel, time::SystemTime};
@@ -565,6 +576,50 @@ mod tests {
 
     // In input mode, 'F' should be added to the input buffer
     assert_eq!(app.input, vec!['F']);
+  }
+
+  #[test]
+  fn ctrl_f_in_playlist_track_table_opens_playlist_search_input() {
+    let mut app = App::default();
+    let playlist_id = PlaylistId::from_id("37i9dQZF1DX4WYpdgoIcn6")
+      .unwrap()
+      .into_static();
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(playlist_id);
+    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+
+    handle_app(Key::Ctrl('f'), &mut app);
+
+    assert_eq!(app.input_context, InputContext::PlaylistTrackSearch);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::Input);
+  }
+
+  #[test]
+  fn search_key_in_playlist_track_table_opens_global_search_input() {
+    let mut app = App::default();
+    let playlist_id = PlaylistId::from_id("37i9dQZF1DX4WYpdgoIcn6")
+      .unwrap()
+      .into_static();
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(playlist_id);
+    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+
+    handle_app(app.user_config.keys.search, &mut app);
+
+    assert_eq!(app.input_context, InputContext::GlobalSearch);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::Input);
+  }
+
+  #[test]
+  fn search_key_outside_playlist_track_table_opens_global_search_input() {
+    let mut app = App::default();
+    app.track_table.context = Some(TrackTableContext::SavedTracks);
+    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+
+    handle_app(app.user_config.keys.search, &mut app);
+
+    assert_eq!(app.input_context, InputContext::GlobalSearch);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::Input);
   }
 
   #[cfg(target_os = "macos")]
