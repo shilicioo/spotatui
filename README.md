@@ -6,6 +6,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/spotatui.svg)](https://crates.io/crates/spotatui)
 [![Upstream](https://img.shields.io/badge/upstream-Rigellute%2Fspotify--tui-blue)](https://github.com/Rigellute/spotify-tui)
+[![X](https://img.shields.io/badge/@LargeModGames-000000?logo=x&logoColor=white)](https://twitter.com/LargeModGames)
 [![Songs played using Spotatui](https://img.shields.io/badge/dynamic/json?url=https://spotatui-counter.spotatui.workers.dev&query=count&label=Songs%20played%20using%20spotatui&labelColor=0b0f14&color=1ed760&logo=spotify&logoColor=1ed760&style=flat-square&cacheSeconds=600)](https://github.com/LargeModGames/spotatui)
 [![spotatui Contributors](https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/LargeModGames/spotatui/main/.all-contributorsrc&query=%24.contributors.length&label=spotatui%20contributors&color=1ed760&style=flat-square)](#spotatui-contributors)
 [![Upstream Contributors](https://img.shields.io/badge/upstream_contributors-94-orange.svg?style=flat-square)](#upstream-contributors-spotify-tui)
@@ -314,7 +315,7 @@ sudo apt-get install -y -qq pkg-config libssl-dev libxcb1-dev libxcb-render0-dev
 
 ## Maintainer
 
-Maintained by **[LargeModGames](https://github.com/LargeModGames)**.
+Maintained by **[LargeModGames](https://github.com/LargeModGames)** ([@LargeModGames](https://twitter.com/LargeModGames) on Twitter).
 
 Originally forked from [spotify-tui](https://github.com/Rigellute/spotify-tui) by [Alexander Keliris](https://github.com/Rigellute).
 
