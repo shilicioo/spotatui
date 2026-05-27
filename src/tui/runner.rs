@@ -705,6 +705,9 @@ pub async fn start_ui(
     if let Err(e) = crate::infra::history::sync_history_to_cloud(&token).await {
       log::warn!("failed to run exit history cloud sync: {}", e);
     }
+    if let Err(e) = crate::infra::history::clear_now_playing_from_cloud(&token).await {
+      log::warn!("failed to clear now-playing on exit: {}", e);
+    }
   }
 
   reset_window_title(&mut window_title_state)?;

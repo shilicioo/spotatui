@@ -16,6 +16,9 @@ use tokio::sync::Mutex;
 const HISTORY_SUBDIR: &str = "history";
 const LISTENS_FILE_NAME: &str = "listens.jsonl";
 const CLOUD_SYNC_URL: &str = "https://spotatui.com/api/sync";
+const NOW_PLAYING_SYNC_URL: &str = "https://spotatui.com/api/sync/now-playing";
+/// Heartbeat interval: must be well under the 5-minute online threshold used by the website.
+const NOW_PLAYING_HEARTBEAT_SECS: u64 = 60;
 const MAX_INTERVAL_MS: u64 = 5_000;
 const REPLAY_RESET_THRESHOLD_MS: u128 = 15_000;
 const REPLAY_PREVIOUS_PROGRESS_FLOOR_MS: u128 = 30_000;
@@ -87,6 +90,12 @@ struct HistoryCollector {
   last_observed_at: Option<Instant>,
 }
 
+#[derive(Serialize)]
+struct NowPlayingPayload<'a> {
+  title: &'a str,
+  artists: &'a [String],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecapPeriod {
   SevenDays,
@@ -101,24 +110,31 @@ pub fn spawn_history_collector(app: Arc<Mutex<App>>) {
     let mut collector = HistoryCollector::default();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut last_auto_check = Instant::now();
+    let http_client = reqwest::Client::new();
 
     // Check on startup
     perform_auto_recap_check(&app);
 
     // Sync history to cloud on startup
-    let sync_token_opt = if let Ok(app_guard) = app.try_lock() {
+    let sync_token_opt: Option<String> = if let Ok(app_guard) = app.try_lock() {
       app_guard.user_config.behavior.sync_token.clone()
     } else {
       None
     };
 
-    if let Some(token) = sync_token_opt {
+    if let Some(ref token) = sync_token_opt {
+      let token = token.clone();
+      let client = http_client.clone();
       tokio::spawn(async move {
-        if let Err(e) = sync_history_to_cloud(&token).await {
+        if let Err(e) = sync_history_to_cloud_with_client(&client, &token).await {
           log::warn!("failed to run startup history cloud sync: {}", e);
         }
       });
     }
+
+    // Now-playing tracking state
+    let mut last_now_playing: Option<(String, Vec<String>)> = None;
+    let mut last_heartbeat: Option<Instant> = None;
 
     loop {
       interval.tick().await;
@@ -133,6 +149,41 @@ pub fn spawn_history_collector(app: Arc<Mutex<App>>) {
       } else {
         continue;
       };
+
+      // Now-playing sync: update on track change and heartbeat while playing
+      if let Some(ref token) = sync_token_opt {
+        let snap_for_np = snapshot
+          .as_ref()
+          .filter(|s| s.item_kind == PlaybackItemKind::Track);
+        match snap_for_np {
+          Some(snap) => {
+            let current_id = (snap.metadata.title.clone(), snap.metadata.artists.clone());
+            let track_changed = last_now_playing.as_ref() != Some(&current_id);
+            let heartbeat_due = snap.is_playing
+              && last_heartbeat
+                .map(|t| t.elapsed().as_secs() >= NOW_PLAYING_HEARTBEAT_SECS)
+                .unwrap_or(false);
+
+            if track_changed || heartbeat_due {
+              last_now_playing = Some(current_id.clone());
+              last_heartbeat = Some(Instant::now());
+              let token_clone = token.clone();
+              let client = http_client.clone();
+              let (title, artists) = current_id;
+              tokio::spawn(async move {
+                if let Err(e) =
+                  sync_now_playing_to_cloud(&client, &token_clone, &title, &artists).await
+                {
+                  log::warn!("failed to sync now-playing: {}", e);
+                }
+              });
+            }
+          }
+          None => {
+            last_now_playing = None;
+          }
+        }
+      }
 
       if let Err(error) = collector.observe(snapshot) {
         log::warn!("listening history collector failed: {}", error);
@@ -1470,6 +1521,102 @@ fn last_synced_file_path() -> Result<PathBuf> {
   )
 }
 
+/// Post the current now-playing track to the cloud dashboard.
+/// Uses a shared HTTP client to reuse the connection pool across frequent calls.
+async fn sync_now_playing_to_cloud(
+  client: &reqwest::Client,
+  sync_token: &str,
+  title: &str,
+  artists: &[String],
+) -> Result<()> {
+  let payload = NowPlayingPayload { title, artists };
+  let response = client
+    .post(NOW_PLAYING_SYNC_URL)
+    .header("Authorization", format!("Bearer {}", sync_token))
+    .json(&payload)
+    .send()
+    .await?;
+
+  if !response.status().is_success() {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    return Err(anyhow!("now-playing sync failed ({}): {}", status, body));
+  }
+  Ok(())
+}
+
+/// Clear the now-playing status when the TUI exits.
+pub async fn clear_now_playing_from_cloud(sync_token: &str) -> Result<()> {
+  let client = reqwest::Client::new();
+  let response = client
+    .delete(NOW_PLAYING_SYNC_URL)
+    .header("Authorization", format!("Bearer {}", sync_token))
+    .send()
+    .await?;
+
+  if !response.status().is_success() {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    return Err(anyhow!("clear now-playing failed ({}): {}", status, body));
+  }
+  Ok(())
+}
+
+/// Internal helper used by the history collector's shared HTTP client.
+async fn sync_history_to_cloud_with_client(
+  client: &reqwest::Client,
+  sync_token: &str,
+) -> Result<()> {
+  let path = last_synced_file_path()?;
+
+  use chrono::TimeZone;
+  let last_synced_at = match fs::read_to_string(&path) {
+    Ok(content) => DateTime::parse_from_rfc3339(content.trim())
+      .map(|dt| dt.with_timezone(&Utc))
+      .unwrap_or_else(|_| Utc.timestamp_opt(0, 0).unwrap()),
+    Err(_) => Utc.timestamp_opt(0, 0).unwrap(),
+  };
+
+  let listens = load_listens()?;
+  let new_listens: Vec<&ListenRecord> = listens
+    .iter()
+    .filter(|record| record.ended_at > last_synced_at)
+    .collect();
+
+  if new_listens.is_empty() {
+    log::info!("no new listening history records to sync");
+    return Ok(());
+  }
+
+  let response = client
+    .post(CLOUD_SYNC_URL)
+    .header("Authorization", format!("Bearer {}", sync_token))
+    .json(&new_listens)
+    .send()
+    .await?;
+
+  if response.status().is_success() {
+    if let Some(last_record) = new_listens.last() {
+      fs::write(&path, last_record.ended_at.to_rfc3339())?;
+    }
+    log::info!(
+      "successfully synchronized listening history to cloud ({} tracks)",
+      new_listens.len()
+    );
+  } else {
+    let status = response.status();
+    let err_body = response.text().await.unwrap_or_default();
+    log::warn!(
+      "failed to synchronize history: {} (status {})",
+      err_body,
+      status
+    );
+    return Err(anyhow!("Sync failed: {}", err_body));
+  }
+
+  Ok(())
+}
+
 pub async fn sync_history_to_cloud(sync_token: &str) -> Result<()> {
   let path = last_synced_file_path()?;
 
@@ -1566,5 +1713,10 @@ mod tests {
   #[test]
   fn cloud_sync_uses_public_spotatui_domain() {
     assert_eq!(CLOUD_SYNC_URL, "https://spotatui.com/api/sync");
+  }
+
+  #[test]
+  fn now_playing_uses_public_spotatui_domain() {
+    assert_eq!(NOW_PLAYING_SYNC_URL, "https://spotatui.com/api/sync/now-playing");
   }
 }
