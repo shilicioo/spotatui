@@ -55,12 +55,14 @@ use log::warn;
 #[cfg(feature = "streaming")]
 use rspotify::{model::user::PrivateUser, AuthCodePkceSpotify};
 #[cfg(feature = "streaming")]
+use std::path::Path;
+#[cfg(feature = "streaming")]
 use std::time::Duration;
 use std::{
   fs,
   io::{self, Write},
   panic,
-  path::{Path, PathBuf},
+  path::PathBuf,
   sync::{atomic::AtomicU64, Arc},
 };
 use tokio::sync::Mutex;
