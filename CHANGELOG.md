@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Click and drag to seek on the playbar**: The progress bar is now interactive. Click anywhere on the gauge to jump to that position, or click and drag to scrub. Control buttons keep priority, the time label stays non-clickable, and seeks reuse the existing native and throttled-API paths ([#157](https://github.com/LargeModGames/spotatui/issues/157)).
+
+### Fixed
+
+- **Search box no longer traps focus on submit**: Pressing `Enter` to run a search now always moves focus to the results list, including when re-searching while already on the Search screen (previously focus stayed stuck in the input box) ([#191](https://github.com/LargeModGames/spotatui/issues/191)).
+- **Cover-art load failures are non-fatal**: A failed album-image fetch is now logged and ignored instead of surfacing a blocking error and aborting the now-playing update, so playback metadata keeps updating when artwork can't be loaded ([#142](https://github.com/LargeModGames/spotatui/issues/142)).
+
 ## [v0.38.6] 2026-05-28
 
 ### Fixed
