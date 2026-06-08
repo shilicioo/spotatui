@@ -116,6 +116,13 @@ fn process_input(app: &mut App, input: String) {
   // Default fallback behavior: treat the input as a raw search phrase.
   app.dispatch(IoEvent::GetSearchResults(input, app.get_user_country()));
   app.push_navigation_stack(RouteId::Search, ActiveBlock::SearchResultBlock);
+  // push_navigation_stack is a no-op when the Search route is already on top, which
+  // otherwise leaves focus trapped in the input box. Force focus onto the results so
+  // submitting a search always escapes the search box (#191).
+  app.set_current_route_state(
+    Some(ActiveBlock::SearchResultBlock),
+    Some(ActiveBlock::SearchResultBlock),
+  );
 }
 
 fn process_playlist_track_search(app: &mut App, input: String) {
@@ -387,6 +394,34 @@ mod tests {
 
     assert!(app.active_playlist_track_filter.is_none());
     assert!(rx.try_recv().is_err());
+  }
+
+  #[test]
+  fn search_enter_on_search_route_moves_focus_to_results() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = App::new(
+      tx,
+      crate::core::user_config::UserConfig::new(),
+      std::time::SystemTime::now(),
+    );
+
+    // Already on the Search route with focus in the input box. This is the case
+    // that previously left focus trapped in the search box on submit (#191).
+    app.push_navigation_stack(RouteId::Search, ActiveBlock::Input);
+    app.input = str_to_vec_char("daft punk");
+    app.input_idx = app.input.len();
+    app.input_cursor_position = app.input.len() as u16;
+
+    handler(Key::Enter, &mut app);
+
+    match rx.recv().unwrap() {
+      IoEvent::GetSearchResults(query, _) => assert_eq!(query, "daft punk"),
+      _ => panic!("unexpected event"),
+    }
+
+    let route = app.get_current_route();
+    assert_eq!(route.active_block, ActiveBlock::SearchResultBlock);
+    assert_eq!(route.hovered_block, ActiveBlock::SearchResultBlock);
   }
 
   #[test]
