@@ -2,7 +2,8 @@
   not(any(
     feature = "discord-rpc",
     all(feature = "mpris", target_os = "linux"),
-    all(feature = "macos-media", target_os = "macos")
+    all(feature = "macos-media", target_os = "macos"),
+    all(feature = "windows-media", target_os = "windows")
   )),
   allow(dead_code)
 )]

@@ -84,6 +84,17 @@ struct MacosMetadata {
   duration_ms: u32,
   art_url: Option<String>,
 }
+
+#[cfg(all(feature = "windows-media", target_os = "windows"))]
+#[derive(Default, PartialEq)]
+struct WindowsMetadata {
+  title: String,
+  artists: Vec<String>,
+  album: String,
+  duration: u64,
+  art_url: Option<String>,
+}
+
 #[cfg(feature = "discord-rpc")]
 fn resolve_discord_app_id(user_config: &UserConfig) -> Option<String> {
   std::env::var("SPOTATUI_DISCORD_APP_ID")
@@ -115,6 +126,36 @@ fn update_macos_metadata(
         &snapshot.metadata.artists,
         &snapshot.metadata.album,
         snapshot.metadata.duration_ms,
+        snapshot.metadata.image_url,
+      );
+      *last_metadata = Some(new_metadata);
+    }
+  } else if last_metadata.is_some() {
+    *last_metadata = None;
+  }
+}
+
+#[cfg(all(feature = "windows-media", target_os = "windows"))]
+fn update_windows_metadata(
+  manager: &smtc_tokio::WindowsMediaManager,
+  last_metadata: &mut Option<WindowsMetadata>,
+  app: &App,
+) {
+  if let Some(snapshot) = crate::infra::media_metadata::current_playback_snapshot(app) {
+    let new_metadata = WindowsMetadata {
+      title: snapshot.metadata.title.clone(),
+      artists: snapshot.metadata.artists.clone(),
+      album: snapshot.metadata.album.clone(),
+      duration: snapshot.metadata.duration_ms as u64,
+      art_url: snapshot.metadata.image_url.clone(),
+    };
+
+    if last_metadata.as_ref() != Some(&new_metadata) {
+      manager.set_metadata(
+        &snapshot.metadata.title,
+        &snapshot.metadata.artists,
+        &snapshot.metadata.album,
+        snapshot.metadata.duration_ms as u64,
         snapshot.metadata.image_url,
       );
       *last_metadata = Some(new_metadata);
@@ -943,6 +984,26 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         None
       };
 
+    #[cfg(all(feature = "windows-media", target_os = "windows"))]
+    let windows_media_manager: Option<Arc<smtc_tokio::WindowsMediaManager>> =
+      if streaming_player.is_some() {
+        match smtc_tokio::WindowsMediaManager::new() {
+          Ok(mgr) => {
+            info!("windows smtc com registered - media keys enabled");
+            Some(Arc::new(mgr))
+          }
+          Err(e) => {
+            info!(
+              "failed to initialize windows smtc com: {} - media keys disabled",
+              e
+            );
+            None
+          }
+        }
+      } else {
+        None
+      };
+
     #[cfg(feature = "discord-rpc")]
     let discord_rpc_manager: DiscordRpcHandle = if user_config.behavior.enable_discord_rpc {
       match resolve_discord_app_id(&user_config)
@@ -1017,6 +1078,53 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
       });
     }
 
+    #[cfg(all(feature = "windows-media", target_os = "windows"))]
+    if let Some(ref windows_media) = windows_media_manager {
+      if let Some(event_rx) = windows_media.take_event_rx() {
+        let app_for_windows = Arc::clone(&app);
+        tokio::spawn(async move {
+          handle_windows_media_events(event_rx, app_for_windows).await;
+        });
+      }
+    }
+
+    #[cfg(all(feature = "windows-media", target_os = "windows"))]
+    if let Some(ref windows_media) = windows_media_manager {
+      let windows_media_for_metadata = Arc::clone(windows_media);
+      let app_for_windows_metadata = Arc::clone(&app);
+      tokio::spawn(async move {
+        let mut last_metadata: Option<WindowsMetadata> = None;
+        let mut last_playing: Option<bool> = None; // Track play state
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+        loop {
+          interval.tick().await;
+          if let Ok(app) = app_for_windows_metadata.try_lock() {
+            update_windows_metadata(&windows_media_for_metadata, &mut last_metadata, &app);
+            let is_playing = if app.native_track_info.is_some() {
+              app.native_is_playing.unwrap_or(false)
+            } else {
+              app
+                .current_playback_context
+                .as_ref()
+                .map(|c| c.is_playing)
+                .unwrap_or(false)
+            };
+
+            if app.native_track_info.is_none() {
+              if last_playing != Some(is_playing) {
+                windows_media_for_metadata.set_playback_status(is_playing);
+                last_playing = Some(is_playing);
+              }
+              windows_media_for_metadata.set_position(app.song_progress_ms as u64);
+            } else {
+              last_playing = Some(is_playing);
+            }
+          }
+        }
+      });
+    }
+
     // Clone MPRIS manager for player event handler
     #[cfg(all(feature = "streaming", feature = "mpris", target_os = "linux"))]
     let mpris_for_events = mpris_manager.clone();
@@ -1028,6 +1136,9 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     // Clone MPRIS manager for UI loop (to update status on device changes)
     #[cfg(all(feature = "mpris", target_os = "linux"))]
     let mpris_for_ui = mpris_manager.clone();
+
+    #[cfg(all(feature = "windows-media", target_os = "windows"))]
+    let windows_media_for_events = windows_media_manager.clone();
 
     // Spawn player event listener (updates app state from native player events)
     #[cfg(feature = "streaming")]
@@ -1042,6 +1153,8 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         mpris_manager: mpris_for_events,
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         macos_media_manager: macos_media_for_events,
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        windows_media_manager: windows_media_for_events,
       });
     }
 
@@ -1059,6 +1172,8 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         mpris_manager: mpris_manager.clone(),
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         macos_media_manager: macos_media_manager.clone(),
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        windows_media_manager: windows_media_manager.clone(),
       });
     }
 
@@ -1400,6 +1515,80 @@ async fn handle_macos_media_events(
       }
       MacMediaEvent::Stop => {
         player.stop();
+      }
+    }
+  }
+}
+
+#[cfg(all(feature = "windows-media", target_os = "windows"))]
+async fn handle_windows_media_events(
+  mut event_rx: tokio::sync::mpsc::UnboundedReceiver<smtc_tokio::WindowsMediaEvent>,
+  app: Arc<Mutex<App>>,
+) {
+  use smtc_tokio::WindowsMediaEvent;
+
+  while let Some(event) = event_rx.recv().await {
+    let player_opt = player::active_streaming_player(&app).await;
+
+    let is_native_loaded = app.lock().await.native_track_info.is_some();
+
+    match event {
+      WindowsMediaEvent::Play => {
+        if let Some(player) = &player_opt {
+          if is_native_loaded {
+            player.play();
+            continue;
+          }
+        }
+        app
+          .lock()
+          .await
+          .dispatch(IoEvent::StartPlayback(None, None, None));
+      }
+      WindowsMediaEvent::Pause => {
+        if let Some(player) = &player_opt {
+          if is_native_loaded {
+            player.pause();
+            continue;
+          }
+        }
+        app.lock().await.dispatch(IoEvent::PausePlayback);
+      }
+      WindowsMediaEvent::Next => {
+        if let Some(player) = &player_opt {
+          player.activate();
+          player.next();
+          player.play();
+        } else {
+          app.lock().await.dispatch(IoEvent::NextTrack);
+        }
+      }
+      WindowsMediaEvent::Previous => {
+        if let Some(player) = &player_opt {
+          player.activate();
+          player.prev();
+          player.play();
+        } else {
+          app.lock().await.dispatch(IoEvent::PreviousTrack);
+        }
+      }
+      WindowsMediaEvent::Stop => {
+        if let Some(player) = &player_opt {
+          player.stop();
+        } else {
+          app.lock().await.dispatch(IoEvent::PausePlayback);
+        }
+      }
+      WindowsMediaEvent::SetPosition(pos) => {
+        if let Some(player) = &player_opt {
+          if is_native_loaded {
+            player.seek(pos as u32);
+            continue;
+          }
+        }
+        let mut app_lock = app.lock().await;
+        app_lock.song_progress_ms = pos as u128;
+        app_lock.dispatch(IoEvent::Seek(pos as u32));
       }
     }
   }

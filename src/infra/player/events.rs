@@ -30,6 +30,8 @@ pub struct PlayerEventContext {
   pub mpris_manager: Option<Arc<mpris::MprisManager>>,
   #[cfg(all(feature = "macos-media", target_os = "macos"))]
   pub macos_media_manager: Option<Arc<macos_media::MacMediaManager>>,
+  #[cfg(all(feature = "windows-media", target_os = "windows"))]
+  pub windows_media_manager: Option<Arc<smtc_tokio::WindowsMediaManager>>,
 }
 
 pub struct StreamingRecoveryContext {
@@ -44,6 +46,8 @@ pub struct StreamingRecoveryContext {
   pub mpris_manager: Option<Arc<mpris::MprisManager>>,
   #[cfg(all(feature = "macos-media", target_os = "macos"))]
   pub macos_media_manager: Option<Arc<macos_media::MacMediaManager>>,
+  #[cfg(all(feature = "windows-media", target_os = "windows"))]
+  pub windows_media_manager: Option<Arc<smtc_tokio::WindowsMediaManager>>,
 }
 
 pub fn spawn_streaming_recovery_handler(ctx: StreamingRecoveryContext) {
@@ -108,6 +112,8 @@ async fn handle_streaming_recovery(mut ctx: StreamingRecoveryContext) {
           mpris_manager: ctx.mpris_manager.clone(),
           #[cfg(all(feature = "macos-media", target_os = "macos"))]
           macos_media_manager: ctx.macos_media_manager.clone(),
+          #[cfg(all(feature = "windows-media", target_os = "windows"))]
+          windows_media_manager: ctx.windows_media_manager.clone(),
         });
       }
       Err(e) => {
@@ -138,6 +144,8 @@ pub fn spawn_player_event_handler(ctx: PlayerEventContext) {
   let mpris_manager = ctx.mpris_manager.clone();
   #[cfg(all(feature = "macos-media", target_os = "macos"))]
   let macos_media_manager = ctx.macos_media_manager.clone();
+  #[cfg(all(feature = "windows-media", target_os = "windows"))]
+  let windows_media_manager = ctx.windows_media_manager.clone();
 
   tokio::spawn(async move {
     handle_player_events(
@@ -151,6 +159,8 @@ pub fn spawn_player_event_handler(ctx: PlayerEventContext) {
       mpris_manager,
       #[cfg(all(feature = "macos-media", target_os = "macos"))]
       macos_media_manager,
+      #[cfg(all(feature = "windows-media", target_os = "windows"))]
+      windows_media_manager,
     )
     .await;
   });
@@ -170,6 +180,9 @@ async fn handle_player_events(
   >,
   #[cfg(all(feature = "macos-media", target_os = "macos"))] macos_media_manager: Option<
     Arc<macos_media::MacMediaManager>,
+  >,
+  #[cfg(all(feature = "windows-media", target_os = "windows"))] windows_media_manager: Option<
+    Arc<smtc_tokio::WindowsMediaManager>,
   >,
 ) {
   use chrono::TimeDelta;
@@ -204,6 +217,11 @@ async fn handle_player_events(
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_playback_status(true);
+        }
+
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        if let Some(ref windows_media) = windows_media_manager {
+          windows_media.set_playback_status(true);
         }
 
         {
@@ -252,6 +270,11 @@ async fn handle_player_events(
           macos_media.set_playback_status(false);
         }
 
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        if let Some(ref windows_media) = windows_media_manager {
+          windows_media.set_playback_status(false);
+        }
+
         {
           let mut app_lock = app.lock().await;
           app_lock.native_is_playing = Some(false);
@@ -275,6 +298,11 @@ async fn handle_player_events(
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_position(position_ms as u64);
+        }
+
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        if let Some(ref windows_media) = windows_media_manager {
+          windows_media.set_position(position_ms as u64);
         }
 
         if let Ok(mut app) = app.try_lock() {
@@ -332,6 +360,17 @@ async fn handle_player_events(
           );
         }
 
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        if let Some(ref windows_media) = windows_media_manager {
+          windows_media.set_metadata(
+            &audio_item.name,
+            &artists,
+            &album,
+            audio_item.duration_ms as u64,
+            None,
+          );
+        }
+
         let mut app = app.lock().await;
         app.native_track_info = Some(app::NativeTrackInfo {
           name: audio_item.name.clone(),
@@ -355,6 +394,11 @@ async fn handle_player_events(
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_stopped();
+        }
+
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        if let Some(ref windows_media) = windows_media_manager {
+          windows_media.set_stopped();
         }
 
         if let Ok(mut app) = app.try_lock() {
@@ -381,6 +425,11 @@ async fn handle_player_events(
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_stopped();
+        }
+
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        if let Some(ref windows_media) = windows_media_manager {
+          windows_media.set_stopped();
         }
 
         if let Ok(mut app) = app.try_lock() {
@@ -445,6 +494,11 @@ async fn handle_player_events(
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_position(position_ms as u64);
         }
+
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        if let Some(ref windows_media) = windows_media_manager {
+          windows_media.set_position(position_ms as u64);
+        }
       }
       PlayerEvent::SessionDisconnected { .. } => {
         #[cfg(all(feature = "mpris", target_os = "linux"))]
@@ -455,6 +509,11 @@ async fn handle_player_events(
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_stopped();
+        }
+
+        #[cfg(all(feature = "windows-media", target_os = "windows"))]
+        if let Some(ref windows_media) = windows_media_manager {
+          windows_media.set_stopped();
         }
 
         if let Some(request) = disconnect_streaming_player(
