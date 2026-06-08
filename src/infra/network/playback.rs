@@ -485,10 +485,10 @@ impl PlaybackNetwork for Network {
               };
 
               if let Some(image) = image {
-                if let anyhow::Result::Err(err) = app.cover_art.refresh(image).await {
-                  drop(app);
-                  self.handle_error(err).await;
-                  return;
+                // Cover art is non-essential: a failed image fetch must not surface a
+                // blocking error or abort the rest of the playback-context update (#142).
+                if let Err(err) = app.cover_art.refresh(image).await {
+                  log::warn!("ignoring cover art load failure: {err}");
                 }
               }
             }
