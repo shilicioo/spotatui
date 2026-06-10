@@ -746,6 +746,7 @@ pub struct BehaviorConfigString {
   pub playbar_height_rows: Option<u16>,
   pub library_height_percent: Option<u8>,
   pub startup_behavior: Option<StartupBehavior>,
+  pub auto_recover_native_device: Option<bool>,
   pub disable_auto_update: Option<bool>,
   pub auto_update_delay: Option<String>,
   #[cfg(feature = "cover-art")]
@@ -791,6 +792,7 @@ pub struct BehaviorConfig {
   pub playbar_height_rows: u16,
   pub library_height_percent: u8,
   pub startup_behavior: StartupBehavior,
+  pub auto_recover_native_device: bool,
   pub disable_auto_update: bool,
   pub auto_update_delay: String,
   #[cfg(feature = "cover-art")]
@@ -914,6 +916,7 @@ impl UserConfig {
         playbar_height_rows: 6,
         library_height_percent: 30,
         startup_behavior: StartupBehavior::Continue,
+        auto_recover_native_device: true,
         disable_auto_update: false,
         auto_update_delay: "0".to_string(),
         #[cfg(feature = "cover-art")]
@@ -1244,6 +1247,10 @@ impl UserConfig {
       self.behavior.startup_behavior = startup_behavior;
     }
 
+    if let Some(auto_recover_native_device) = behavior_config.auto_recover_native_device {
+      self.behavior.auto_recover_native_device = auto_recover_native_device;
+    }
+
     if let Some(disable_auto_update) = behavior_config.disable_auto_update {
       self.behavior.disable_auto_update = disable_auto_update;
     }
@@ -1349,6 +1356,7 @@ impl UserConfig {
       playbar_height_rows: Some(self.behavior.playbar_height_rows),
       library_height_percent: Some(self.behavior.library_height_percent),
       startup_behavior: Some(self.behavior.startup_behavior),
+      auto_recover_native_device: Some(self.behavior.auto_recover_native_device),
       disable_auto_update: Some(self.behavior.disable_auto_update),
       auto_update_delay: Some(self.behavior.auto_update_delay.clone()),
       #[cfg(feature = "cover-art")]

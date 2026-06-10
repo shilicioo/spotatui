@@ -3336,6 +3336,12 @@ impl App {
           ),
         },
         SettingItem {
+          id: "behavior.auto_recover_native_device".to_string(),
+          name: "Auto-Recover Native Device".to_string(),
+          description: "Recover the native spotatui device automatically when play finds no active Spotify device".to_string(),
+          value: SettingValue::Bool(self.user_config.behavior.auto_recover_native_device),
+        },
+        SettingItem {
           id: "behavior.enable_announcements".to_string(),
           name: "Remote Announcements".to_string(),
           description: "Show one-time announcements from remote JSON feed".to_string(),
@@ -3804,6 +3810,11 @@ impl App {
         "behavior.keepawake_enabled" => {
           if let SettingValue::Bool(v) = &setting.value {
             self.user_config.behavior.keepawake_enabled = *v;
+          }
+        }
+        "behavior.auto_recover_native_device" => {
+          if let SettingValue::Bool(v) = &setting.value {
+            self.user_config.behavior.auto_recover_native_device = *v;
           }
         }
         "behavior.enable_announcements" => {

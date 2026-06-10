@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- **Native device selection and playback startup**: Made the local `spotatui` Connect device selectable when Spotify's devices API omits it, recovered stale native streaming sessions after long idle, fixed `Esc`/`Enter` handling in the device selector, and avoided `NO_ACTIVE_DEVICE` playback failures when native streaming is connected but no Spotify playback context is active ([#292](https://github.com/LargeModGames/spotatui/issues/292)).
+- **Native device selection and playback startup**: Made the local `spotatui` Connect device selectable when Spotify's devices API omits it, added a configurable native-device auto-recovery path for `NO_ACTIVE_DEVICE` playback starts, recovered stale native streaming sessions after long idle, and fixed `Esc`/`Enter` handling in the device selector ([#292](https://github.com/LargeModGames/spotatui/issues/292)).
 - **Search box no longer traps focus on submit**: Pressing `Enter` to run a search now always moves focus to the results list, including when re-searching while already on the Search screen (previously focus stayed stuck in the input box) ([#191](https://github.com/LargeModGames/spotatui/issues/191)).
 - **Cover-art load failures are non-fatal**: A failed album-image fetch is now logged and ignored instead of surfacing a blocking error and aborting the now-playing update, so playback metadata keeps updating when artwork can't be loaded ([#142](https://github.com/LargeModGames/spotatui/issues/142)).
 

@@ -269,10 +269,76 @@ async fn should_activate_native_streaming_for_playback(network: &Network) -> boo
   })
 }
 
+#[cfg(any(feature = "streaming", test))]
+fn playback_error_is_no_active_device(message: &str) -> bool {
+  message.contains("NO_ACTIVE_DEVICE")
+    || message.contains("No active device found")
+    || message.contains("No active device")
+}
+
+#[cfg(feature = "streaming")]
+async fn should_auto_recover_native_device_on_play(network: &Network) -> bool {
+  let app = network.app.lock().await;
+  app.user_config.behavior.auto_recover_native_device
+}
+
 #[cfg(feature = "streaming")]
 async fn request_native_streaming_recovery_if_disconnected(network: &Network) -> bool {
   let mut app = network.app.lock().await;
   app.request_native_streaming_recovery_if_disconnected(true)
+}
+
+#[cfg(feature = "streaming")]
+async fn activate_native_device_after_no_active_device(network: &Network) -> bool {
+  let Some(player) = current_streaming_player(network).await else {
+    return false;
+  };
+
+  let activation_time = Instant::now();
+  let should_activate = {
+    let mut app = network.app.lock().await;
+    if !app.user_config.behavior.auto_recover_native_device {
+      return false;
+    }
+
+    if app
+      .last_device_activation
+      .is_some_and(|instant| instant.elapsed() < Duration::from_secs(5))
+    {
+      return false;
+    }
+
+    let current_context_is_native = match app.current_playback_context.as_ref() {
+      None => true,
+      Some(ctx) => {
+        ctx.device.name.eq_ignore_ascii_case(player.device_name())
+          || app
+            .native_device_id
+            .as_ref()
+            .is_some_and(|native_id| ctx.device.id.as_ref() == Some(native_id))
+      }
+    };
+
+    if !current_context_is_native {
+      return false;
+    }
+
+    app.is_streaming_active = true;
+    app.native_activation_pending = true;
+    app.native_device_id = Some(player.device_id());
+    app.current_playback_context = None;
+    app.last_device_activation = Some(activation_time);
+    app.instant_since_last_current_playback_poll = activation_time - Duration::from_secs(6);
+    app.set_status_message("No active Spotify device; activating spotatui.", 6);
+    true
+  };
+
+  if should_activate {
+    let _ = player.transfer(None);
+    player.activate();
+  }
+
+  should_activate
 }
 
 #[cfg(feature = "streaming")]
@@ -658,7 +724,9 @@ impl PlaybackNetwork for Network {
 
     // Check if we should use native streaming for playback
     #[cfg(feature = "streaming")]
-    if request_native_streaming_recovery_if_disconnected(self).await {
+    if should_auto_recover_native_device_on_play(self).await
+      && request_native_streaming_recovery_if_disconnected(self).await
+    {
       return;
     }
 
@@ -848,8 +916,19 @@ impl PlaybackNetwork for Network {
         app.user_config.behavior.shuffle_enabled = desired_shuffle_state;
       }
       Err(e) => {
+        let err = anyhow!(e);
+
+        #[cfg(feature = "streaming")]
+        if playback_error_is_no_active_device(&err.to_string())
+          && activate_native_device_after_no_active_device(self).await
+        {
+          let mut app = self.app.lock().await;
+          app.dispatch(IoEvent::StartPlayback(context_id, uris, offset));
+          return;
+        }
+
         let mut app = self.app.lock().await;
-        app.handle_error(anyhow!(e));
+        app.handle_error(err);
       }
     }
   }
@@ -1587,6 +1666,19 @@ mod tests {
         native_activation_pending: false,
         api_device_is_native: false,
       },
+    ));
+  }
+
+  #[test]
+  fn detects_no_active_device_playback_errors() {
+    assert!(playback_error_is_no_active_device(
+      r#"Spotify API 404 Not Found failed: { "error": { "reason": "NO_ACTIVE_DEVICE" } }"#,
+    ));
+    assert!(playback_error_is_no_active_device(
+      "Player command failed: No active device found",
+    ));
+    assert!(!playback_error_is_no_active_device(
+      "Spotify API 500 Internal Server Error failed",
     ));
   }
 }
