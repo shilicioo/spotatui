@@ -3,7 +3,7 @@ use ratatui::{
   layout::{Alignment, Constraint, Layout, Rect},
   style::{Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs},
+  widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs},
   Frame,
 };
 
@@ -162,7 +162,10 @@ fn draw_settings_list(f: &mut Frame<'_>, app: &App, area: Rect) {
       ),
     );
 
-  f.render_widget(list, area);
+  let mut state = ListState::default();
+  state.select(Some(app.settings_selected_index));
+
+  f.render_stateful_widget(list, area, &mut state);
 }
 
 fn format_terminal_input_caps(app: &App) -> String {
