@@ -935,6 +935,10 @@ pub struct App {
   /// Reference to the native streaming player for direct control (bypasses event channel)
   #[cfg(feature = "streaming")]
   pub streaming_player: Option<Arc<crate::infra::player::StreamingPlayer>>,
+  /// Sender used to recover native streaming when a stale/disconnected player is detected.
+  #[cfg(feature = "streaming")]
+  pub streaming_recovery_tx:
+    Option<tokio::sync::mpsc::UnboundedSender<crate::infra::player::StreamingRecoveryRequest>>,
   /// Reference to MPRIS manager for emitting Seeked signals after native seeks
   #[cfg(all(feature = "mpris", target_os = "linux"))]
   pub mpris_manager: Option<Arc<crate::infra::mpris::MprisManager>>,
@@ -1151,6 +1155,8 @@ impl Default for App {
       last_dispatched_volume: None,
       #[cfg(feature = "streaming")]
       streaming_player: None,
+      #[cfg(feature = "streaming")]
+      streaming_recovery_tx: None,
       #[cfg(all(feature = "mpris", target_os = "linux"))]
       mpris_manager: None,
       #[cfg(feature = "cover-art")]
@@ -1382,6 +1388,42 @@ impl App {
   pub fn set_status_message(&mut self, message: impl Into<String>, ttl_secs: u64) {
     self.status_message = Some(message.into());
     self.status_message_expires_at = Some(Instant::now() + Duration::from_secs(ttl_secs));
+  }
+
+  #[cfg(feature = "streaming")]
+  pub fn request_native_streaming_recovery_if_disconnected(
+    &mut self,
+    reselect_device: bool,
+  ) -> bool {
+    let Some(player) = self.streaming_player.as_ref() else {
+      return false;
+    };
+
+    if player.is_connected() {
+      return false;
+    }
+
+    self.streaming_player = None;
+    self.is_streaming_active = false;
+    self.native_activation_pending = false;
+    self.native_device_id = None;
+    self.native_is_playing = Some(false);
+    self.native_track_info = None;
+    self.native_playback_origin = None;
+    self.song_progress_ms = 0;
+    self.last_track_id = None;
+    self.last_device_activation = None;
+    self.seek_ms = None;
+    if reselect_device {
+      self.current_playback_context = None;
+    }
+
+    self.set_status_message("Native streaming disconnected; attempting recovery.", 8);
+    if let Some(tx) = &self.streaming_recovery_tx {
+      let _ = tx.send(crate::infra::player::StreamingRecoveryRequest { reselect_device });
+    }
+    self.dispatch(IoEvent::GetCurrentPlayback);
+    true
   }
 
   pub fn playlist_is_editable(&self, playlist: &SimplifiedPlaylist) -> bool {

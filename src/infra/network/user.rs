@@ -12,6 +12,8 @@ use rspotify::model::{
   track::FullTrack,
   user::PrivateUser,
 };
+#[cfg(feature = "streaming")]
+use rspotify::model::{enums::DeviceType, Device};
 use rspotify::prelude::*;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -19,6 +21,44 @@ use std::time::{Duration, Instant};
 #[derive(Deserialize)]
 struct ArtistTopTracksResponse {
   tracks: Vec<FullTrack>,
+}
+
+#[cfg(feature = "streaming")]
+fn include_native_streaming_device(app: &crate::core::app::App, payload: &mut DevicePayload) {
+  let Some(player) = app.streaming_player.as_ref() else {
+    return;
+  };
+
+  if !player.is_connected() {
+    return;
+  }
+
+  let device_name = player.device_name();
+  let device_id = app
+    .native_device_id
+    .clone()
+    .unwrap_or_else(|| player.device_id());
+
+  if let Some(device) = payload
+    .devices
+    .iter_mut()
+    .find(|device| device.name.eq_ignore_ascii_case(device_name))
+  {
+    if device.id.is_none() {
+      device.id = Some(device_id);
+    }
+    return;
+  }
+
+  payload.devices.push(Device {
+    id: Some(device_id),
+    is_active: app.is_streaming_active,
+    is_private_session: false,
+    is_restricted: false,
+    name: device_name.to_string(),
+    _type: DeviceType::Computer,
+    volume_percent: Some(player.get_volume().into()),
+  });
 }
 
 pub trait UserNetwork {
@@ -53,16 +93,36 @@ impl UserNetwork for Network {
   }
 
   async fn get_devices(&mut self) {
-    if let Ok(result) = self
+    match self
       .spotify_get_typed::<DevicePayload>("me/player/devices", &[])
       .await
     {
-      let mut app = self.app.lock().await;
-      app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
-      if !result.devices.is_empty() {
+      Ok(result) => {
+        let mut app = self.app.lock().await;
+        app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
+
+        #[cfg(feature = "streaming")]
+        let mut result = result;
+        #[cfg(feature = "streaming")]
+        {
+          let recovering = app.request_native_streaming_recovery_if_disconnected(true);
+          if !recovering {
+            include_native_streaming_device(&app, &mut result);
+          }
+        }
+
+        app.selected_device_index = if result.devices.is_empty() {
+          None
+        } else {
+          app
+            .selected_device_index
+            .filter(|index| *index < result.devices.len())
+            .or(Some(0))
+        };
         app.devices = Some(result);
-        // Select the first device in the list
-        app.selected_device_index = Some(0);
+      }
+      Err(e) => {
+        self.handle_error(anyhow!(e)).await;
       }
     }
   }

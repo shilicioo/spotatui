@@ -242,6 +242,40 @@ async fn is_native_streaming_active_for_playback(network: &Network) -> bool {
 }
 
 #[cfg(feature = "streaming")]
+async fn should_activate_native_streaming_for_playback(network: &Network) -> bool {
+  let saved_device_id = network.client_config.device_id.as_ref();
+  let app = network.app.lock().await;
+  let Some(player) = app.streaming_player.as_ref() else {
+    return false;
+  };
+
+  if !player.is_connected() || app.current_playback_context.is_some() {
+    return false;
+  }
+
+  let Some(saved_device_id) = saved_device_id else {
+    return true;
+  };
+
+  if app.native_device_id.as_ref() == Some(saved_device_id) {
+    return true;
+  }
+
+  app.devices.as_ref().is_some_and(|payload| {
+    payload.devices.iter().any(|device| {
+      device.id.as_ref() == Some(saved_device_id)
+        && device.name.eq_ignore_ascii_case(player.device_name())
+    })
+  })
+}
+
+#[cfg(feature = "streaming")]
+async fn request_native_streaming_recovery_if_disconnected(network: &Network) -> bool {
+  let mut app = network.app.lock().await;
+  app.request_native_streaming_recovery_if_disconnected(true)
+}
+
+#[cfg(feature = "streaming")]
 async fn requested_native_playback_origin(
   network: &Network,
   context_id: &Option<PlayContextId<'static>>,
@@ -624,7 +658,14 @@ impl PlaybackNetwork for Network {
 
     // Check if we should use native streaming for playback
     #[cfg(feature = "streaming")]
-    if is_native_streaming_active_for_playback(self).await {
+    if request_native_streaming_recovery_if_disconnected(self).await {
+      return;
+    }
+
+    #[cfg(feature = "streaming")]
+    if is_native_streaming_active_for_playback(self).await
+      || should_activate_native_streaming_for_playback(self).await
+    {
       if let Some(player) = current_streaming_player(self).await {
         let requested_origin = requested_native_playback_origin(self, &context_id, &uris).await;
         let native_route = resolve_native_playback_route(self, &context_id).await;
@@ -1088,6 +1129,7 @@ impl PlaybackNetwork for Network {
           app.is_streaming_active = true;
           app.native_activation_pending = true;
           app.native_playback_origin = None;
+          app.native_device_id = Some(device_id.clone());
           // Drop the stale previous-device context so playback routing follows the
           // native intent (is_streaming_active) until the next poll repopulates it
           // — mirrors the non-native transfer branch below. Without this, the first
@@ -1095,6 +1137,11 @@ impl PlaybackNetwork for Network {
           app.current_playback_context = None;
           app.last_device_activation = Some(Instant::now());
           app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_secs(6);
+          if persist_device_id {
+            if let Err(e) = self.client_config.set_device_id(device_id) {
+              app.handle_error(anyhow!(e));
+            }
+          }
           return;
         }
       }

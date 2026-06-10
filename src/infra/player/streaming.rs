@@ -495,6 +495,11 @@ impl StreamingPlayer {
     &self.config.device_name
   }
 
+  /// Get the Spotify Connect device id for this session.
+  pub fn device_id(&self) -> String {
+    self.session.device_id().to_string()
+  }
+
   /// Check if the session is connected
   pub fn is_connected(&self) -> bool {
     self.spirc_alive.load(Ordering::Relaxed)

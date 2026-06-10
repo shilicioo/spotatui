@@ -896,6 +896,11 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     #[cfg(feature = "streaming")]
     let (streaming_recovery_tx, streaming_recovery_rx) =
       tokio::sync::mpsc::unbounded_channel::<player::StreamingRecoveryRequest>();
+    #[cfg(feature = "streaming")]
+    {
+      let mut app_mut = app.lock().await;
+      app_mut.streaming_recovery_tx = Some(streaming_recovery_tx.clone());
+    }
 
     // Initialize MPRIS D-Bus integration for desktop media control
     // This registers spotatui as a controllable media player on the session bus

@@ -1,13 +1,10 @@
 use super::common_key_events;
-use crate::core::app::{ActiveBlock, App};
+use crate::core::app::App;
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
 
 pub fn handler(key: Key, app: &mut App) {
   match key {
-    Key::Esc => {
-      app.set_current_route_state(Some(ActiveBlock::Library), None);
-    }
     k if common_key_events::down_event(k) => {
       if let Some(p) = &app.devices {
         if let Some(selected_device_index) = app.selected_device_index {
@@ -51,15 +48,30 @@ pub fn handler(key: Key, app: &mut App) {
       };
     }
     Key::Enter => {
-      if let Some(index) = app.selected_device_index {
-        if let Some(devices) = &app.devices {
-          if let Some(device) = devices.devices.get(index) {
-            if let Some(device_id) = &device.id {
-              app.dispatch(IoEvent::TransferPlaybackToDevice(device_id.clone(), true));
-            }
-          }
-        }
-      }
+      let Some(index) = app.selected_device_index else {
+        app.set_status_message("No playback device selected", 4);
+        return;
+      };
+
+      let Some(devices) = &app.devices else {
+        app.set_status_message("No playback devices found", 4);
+        return;
+      };
+
+      let Some(device) = devices.devices.get(index) else {
+        app.set_status_message("Selected playback device is no longer available", 4);
+        return;
+      };
+
+      let Some(device_id) = &device.id else {
+        app.set_status_message("Selected playback device has no Spotify device id", 4);
+        return;
+      };
+
+      let device_name = device.name.clone();
+      app.dispatch(IoEvent::TransferPlaybackToDevice(device_id.clone(), true));
+      app.set_status_message(format!("Switching playback to {}", device_name), 4);
+      app.pop_navigation_stack();
     }
     _ => {}
   }

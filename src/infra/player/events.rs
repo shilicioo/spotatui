@@ -122,7 +122,11 @@ async fn handle_streaming_recovery(mut ctx: StreamingRecoveryContext) {
 /// Get the currently active streaming player (if any).
 pub async fn active_streaming_player(app: &Arc<Mutex<App>>) -> Option<Arc<StreamingPlayer>> {
   let app_lock = app.lock().await;
-  app_lock.streaming_player.clone()
+  app_lock
+    .streaming_player
+    .as_ref()
+    .filter(|player| player.is_connected())
+    .cloned()
 }
 
 pub fn spawn_player_event_handler(ctx: PlayerEventContext) {

@@ -467,11 +467,14 @@ fn handle_escape(app: &mut App) {
     ActiveBlock::Party => {
       app.pop_navigation_stack();
     }
-    ActiveBlock::LyricsView | ActiveBlock::CoverArtView | ActiveBlock::MiniPlayer => {
+    ActiveBlock::SelectDevice
+    | ActiveBlock::LyricsView
+    | ActiveBlock::CoverArtView
+    | ActiveBlock::MiniPlayer => {
       app.pop_navigation_stack();
     }
-    // These are global views that have no active/inactive distinction so do nothing
-    ActiveBlock::SelectDevice | ActiveBlock::Analysis => {}
+    // This is a global view that has no active/inactive distinction so do nothing
+    ActiveBlock::Analysis => {}
 
     // Announcement prompt must be dismissed with Enter/Esc, not global escape
     ActiveBlock::AnnouncementPrompt => {}
@@ -567,6 +570,7 @@ mod tests {
   use chrono::Utc;
   use rspotify::model::{
     context::{Actions, CurrentPlaybackContext},
+    device::DevicePayload,
     enums::{DeviceType, RepeatState},
     idtypes::PlaylistId,
     CurrentlyPlayingType, Device, PlayableId, PlayableItem,
@@ -617,6 +621,56 @@ mod tests {
     // force_previous_track dispatches through App which requires no io_tx in tests,
     // so just confirm the route didn't change (it shouldn't navigate anywhere)
     assert_eq!(app.get_current_route().active_block, ActiveBlock::Empty);
+  }
+
+  #[test]
+  fn escape_exits_device_selector() {
+    let mut app = App::default();
+    app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
+
+    handle_app(Key::Esc, &mut app);
+
+    assert_ne!(
+      app.get_current_route().active_block,
+      ActiveBlock::SelectDevice
+    );
+  }
+
+  #[test]
+  fn enter_on_device_selector_dispatches_transfer_and_exits() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    app.devices = Some(DevicePayload {
+      devices: vec![Device {
+        id: Some("device-1".to_string()),
+        is_active: false,
+        is_private_session: false,
+        is_restricted: false,
+        name: "Desk Speaker".to_string(),
+        _type: DeviceType::Computer,
+        volume_percent: Some(42),
+      }],
+    });
+    app.selected_device_index = Some(0);
+    app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
+
+    handle_app(Key::Enter, &mut app);
+
+    match rx.recv().unwrap() {
+      IoEvent::TransferPlaybackToDevice(device_id, persist_device_id) => {
+        assert_eq!(device_id, "device-1");
+        assert!(persist_device_id);
+      }
+      _ => panic!("unexpected event"),
+    }
+    assert_ne!(
+      app.get_current_route().active_block,
+      ActiveBlock::SelectDevice
+    );
+    assert_eq!(
+      app.status_message.as_deref(),
+      Some("Switching playback to Desk Speaker")
+    );
   }
 
   #[test]
