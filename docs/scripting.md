@@ -20,7 +20,7 @@ A global table named `spotatui` is available in every plugin.
 
 ### Constants
 
-- `spotatui.api_version` - integer API version (currently `2`).
+- `spotatui.api_version` - integer API version (currently `3`).
 
 ### Events
 
@@ -81,6 +81,93 @@ native streaming fast paths (librespot) when the native player is active.
 ### Logging
 
 - `spotatui.log(msg)` - write an info-level line to the app log.
+
+### JSON utilities
+
+- `spotatui.json_decode(json)` - parse a JSON string into Lua tables, strings, numbers,
+  booleans, and nil-compatible values. Invalid JSON raises a Lua error.
+- `spotatui.json_encode(value)` - serialize a Lua value to a compact JSON string. Values that
+  cannot be represented as JSON, such as functions or userdata, raise a Lua error.
+
+JSON `null` decodes to a light userdata sentinel, not Lua `nil`, and the sentinel is truthy in
+Lua. To detect it, compare against a known null value:
+
+```lua
+local NULL = spotatui.json_decode("null")
+local decoded = spotatui.json_decode('{"artist":null}')
+if decoded.artist == NULL then
+  -- field was present but null
+end
+```
+
+```lua
+local body = spotatui.json_encode({
+  track = "spotify:track:...",
+  rating = 5,
+})
+
+local decoded = spotatui.json_decode('{"ok":true,"items":[1,2]}')
+spotatui.log("first item: " .. decoded.items[1])
+```
+
+### HTTP requests
+
+HTTP runs asynchronously. Calls return immediately; the callback runs on a later UI tick after
+the response arrives. Only `http://` and `https://` URLs are accepted.
+
+- `spotatui.http_get(url, callback)` - send a GET request.
+- `spotatui.http_post(url, body, headers, callback)` - send a POST request. `body` is a string.
+  `headers` must be a table of string keys and string values, or `nil` for no headers. The
+  four-argument form is required, so pass `nil` when you do not need headers.
+
+Callbacks receive `callback(resp, err)`:
+
+- Success: `resp = { status = number, ok = bool, body = string }`, `err = nil`.
+- Transport failure such as DNS, timeout, or connection failure: `resp = nil`, `err = string`.
+- HTTP 4xx and 5xx responses are not transport failures. They call the success path with
+  `resp.ok = false`.
+
+Response bodies are decoded with lossy UTF-8 conversion. In-flight requests are dropped when
+spotatui exits.
+
+```lua
+spotatui.on("track_change", function(pb)
+  if not pb or not pb.track then
+    return
+  end
+
+  local url = "https://example.com/lyrics?uri=" .. pb.track.uri
+  spotatui.http_get(url, function(resp, err)
+    if err then
+      spotatui.notify("lyrics fetch failed: " .. err, 4)
+      return
+    end
+    if resp.ok then
+      local parsed = spotatui.json_decode(resp.body)
+      spotatui.popup("Lyrics", parsed.lines)
+    else
+      spotatui.notify("lyrics service returned " .. resp.status, 4)
+    end
+  end)
+end)
+```
+
+```lua
+local body = spotatui.json_encode({ event = "track_started" })
+
+spotatui.http_post(
+  "https://example.com/webhook",
+  body,
+  { ["content-type"] = "application/json" },
+  function(resp, err)
+    if err then
+      spotatui.log("webhook failed: " .. err)
+    elseif not resp.ok then
+      spotatui.log("webhook returned " .. resp.status)
+    end
+  end
+)
+```
 
 ## Commands and keybindings
 

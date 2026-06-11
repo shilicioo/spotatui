@@ -3,6 +3,7 @@ use crate::core::plugin_api::{PlaybackState, TrackInfo};
 use super::effects::ScriptEffect;
 use super::engine::ScriptEngine;
 use super::events::{diff_events, ScriptEvent};
+use super::shared::HttpResponseData;
 
 fn track(uri: &str, name: &str) -> TrackInfo {
   TrackInfo {
@@ -184,6 +185,427 @@ fn action_notify_default_ttl_is_4() {
       assert_eq!(ttl, 4);
     }
     _ => panic!("expected a Notify effect"),
+  }
+}
+
+mod http_tests {
+  use super::*;
+
+  /// Run `test` inside a tokio runtime, passing a URL backed by a local listener that
+  /// accepts connections but never responds. The real request spawned by `http_get` /
+  /// `http_post` hangs until the client timeout, so it can never race the injected
+  /// synthetic result, and no traffic leaves the machine.
+  fn with_runtime_engine(test: impl FnOnce(&mut ScriptEngine, &str)) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let mut engine = ScriptEngine::new().unwrap();
+    test(&mut engine, &url);
+  }
+
+  fn response(status: u16, body: &str) -> HttpResponseData {
+    HttpResponseData {
+      status,
+      body: body.to_string(),
+    }
+  }
+
+  #[test]
+  fn json_round_trip() {
+    let mut engine = ScriptEngine::new().unwrap();
+    engine
+      .load_source(
+        "json",
+        r#"
+          local decoded = spotatui.json_decode('{"name":"Song","nested":{"ok":true},"items":[1,2]}')
+          local encoded = spotatui.json_encode(decoded)
+          local again = spotatui.json_decode(encoded)
+          spotatui.notify(again.name .. ":" .. tostring(again.nested.ok) .. ":" .. tostring(again.items[2]), 1)
+        "#,
+      )
+      .unwrap();
+
+    match one(&engine) {
+      ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "Song:true:2"),
+      _ => panic!("expected json round-trip notify"),
+    }
+  }
+
+  #[test]
+  fn json_decode_invalid_input_raises() {
+    let mut engine = ScriptEngine::new().unwrap();
+    engine
+      .load_source(
+        "json",
+        r#"
+          local ok = pcall(function()
+            spotatui.json_decode("{")
+          end)
+          spotatui.notify(tostring(ok), 1)
+        "#,
+      )
+      .unwrap();
+
+    match one(&engine) {
+      ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "false"),
+      _ => panic!("expected pcall failure notify"),
+    }
+  }
+
+  #[test]
+  fn json_encode_non_serializable_raises() {
+    let mut engine = ScriptEngine::new().unwrap();
+    engine
+      .load_source(
+        "json",
+        r#"
+          local ok = pcall(function()
+            spotatui.json_encode(function() end)
+          end)
+          spotatui.notify(tostring(ok), 1)
+        "#,
+      )
+      .unwrap();
+
+    match one(&engine) {
+      ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "false"),
+      _ => panic!("expected pcall failure notify"),
+    }
+  }
+
+  #[test]
+  fn json_null_decodes_to_sentinel_not_nil() {
+    let mut engine = ScriptEngine::new().unwrap();
+    engine
+      .load_source(
+        "json",
+        r#"
+          local NULL = spotatui.json_decode("null")
+          local decoded = spotatui.json_decode('{"x":null}')
+          spotatui.notify(tostring(decoded.x == nil) .. ":" .. tostring(decoded.x == NULL), 1)
+        "#,
+      )
+      .unwrap();
+
+    match one(&engine) {
+      ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "false:true"),
+      _ => panic!("expected null sentinel notify"),
+    }
+  }
+
+  #[test]
+  fn http_get_callback_fires_on_synthetic_success() {
+    with_runtime_engine(|engine, url| {
+      let source = format!(
+        r#"
+            spotatui.http_get("{url}", function(resp, err)
+              if err then
+                spotatui.notify(err, 1)
+              else
+                spotatui.notify(resp.body, 1)
+              end
+            end)
+          "#
+      );
+      engine.load_source("fetcher", &source).unwrap();
+
+      engine.inject_http_result(1, Ok(response(200, "hello")));
+      engine.drain_http_callbacks_for_test();
+
+      match one(engine) {
+        ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "hello"),
+        _ => panic!("expected http success notify"),
+      }
+    });
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn http_get_spawn_path_delivers_response() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+      let (mut socket, _) = listener.accept().await.unwrap();
+      let mut buf = [0_u8; 1024];
+      let _ = socket.read(&mut buf).await.unwrap();
+      let body = "from server";
+      let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+      );
+      socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let mut engine = ScriptEngine::new().unwrap();
+    let source = format!(
+      r#"
+        spotatui.http_get("http://{addr}/lyrics", function(resp, err)
+          if err then
+            spotatui.notify(err, 1)
+          else
+            spotatui.notify(tostring(resp.status) .. ":" .. resp.body, 1)
+          end
+        end)
+      "#
+    );
+    engine.load_source("fetcher", &source).unwrap();
+
+    for _ in 0..100 {
+      engine.drain_http_callbacks_for_test();
+      if !engine.shared.effects.borrow().is_empty() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    match one(&engine) {
+      ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "200:from server"),
+      _ => panic!("expected spawned http response notify"),
+    }
+    server.await.unwrap();
+  }
+
+  #[test]
+  fn http_post_callback_fires_on_synthetic_success() {
+    with_runtime_engine(|engine, url| {
+      let source = format!(
+        r#"
+            spotatui.http_post("{url}", "body", nil, function(resp, err)
+              if err then
+                spotatui.notify(err, 1)
+              else
+                spotatui.notify(tostring(resp.status) .. ":" .. resp.body, 1)
+              end
+            end)
+          "#
+      );
+      engine.load_source("poster", &source).unwrap();
+
+      engine.inject_http_result(1, Ok(response(201, "created")));
+      engine.drain_http_callbacks_for_test();
+
+      match one(engine) {
+        ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "201:created"),
+        _ => panic!("expected http post success notify"),
+      }
+    });
+  }
+
+  #[test]
+  fn http_get_callback_fires_on_synthetic_error() {
+    with_runtime_engine(|engine, url| {
+      let source = format!(
+        r#"
+            spotatui.http_get("{url}", function(resp, err)
+              if err then
+                spotatui.notify(err, 1)
+              else
+                spotatui.notify(resp.body, 1)
+              end
+            end)
+          "#
+      );
+      engine.load_source("fetcher", &source).unwrap();
+
+      engine.inject_http_result(1, Err("dns failed".to_string()));
+      engine.drain_http_callbacks_for_test();
+
+      match one(engine) {
+        ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "dns failed"),
+        _ => panic!("expected http error notify"),
+      }
+    });
+  }
+
+  #[test]
+  fn http_callback_is_one_shot() {
+    with_runtime_engine(|engine, url| {
+      let source = format!(
+        r#"
+            spotatui.http_get("{url}", function(resp, err)
+              spotatui.notify(resp.body, 1)
+            end)
+          "#
+      );
+      engine.load_source("fetcher", &source).unwrap();
+
+      engine.inject_http_result(1, Ok(response(200, "first")));
+      engine.drain_http_callbacks_for_test();
+      match one(engine) {
+        ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "first"),
+        _ => panic!("expected first callback notify"),
+      }
+
+      engine.inject_http_result(1, Ok(response(200, "second")));
+      engine.drain_http_callbacks_for_test();
+      assert!(drain(engine).is_empty());
+    });
+  }
+
+  #[test]
+  fn http_callbacks_keep_token_identity_after_earlier_delivery() {
+    with_runtime_engine(|engine, url| {
+      let source = format!(
+        r#"
+            spotatui.http_get("{url}a", function(resp, err)
+              spotatui.notify("a:" .. resp.body, 1)
+            end)
+            spotatui.http_get("{url}b", function(resp, err)
+              spotatui.notify("b:" .. resp.body, 1)
+            end)
+          "#
+      );
+      engine.load_source("fetcher", &source).unwrap();
+
+      engine.inject_http_result(1, Ok(response(200, "one")));
+      engine.drain_http_callbacks_for_test();
+      match one(engine) {
+        ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "a:one"),
+        _ => panic!("expected first callback notify"),
+      }
+
+      engine.inject_http_result(2, Ok(response(200, "two")));
+      engine.drain_http_callbacks_for_test();
+      match one(engine) {
+        ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "b:two"),
+        _ => panic!("expected second callback notify"),
+      }
+    });
+  }
+
+  #[test]
+  fn http_callback_attribution() {
+    with_runtime_engine(|engine, url| {
+      let source = format!(
+        r#"
+            spotatui.http_get("{url}", function(resp, err)
+              spotatui.set_playbar(resp.body)
+            end)
+          "#
+      );
+      engine.load_source("lyrics_plugin", &source).unwrap();
+
+      engine.inject_http_result(1, Ok(response(200, "lyrics ready")));
+      engine.drain_http_callbacks_for_test();
+
+      match one(engine) {
+        ScriptEffect::SetPlaybarSegment { plugin, text } => {
+          assert_eq!(plugin, "lyrics_plugin");
+          assert_eq!(text.as_deref(), Some("lyrics ready"));
+        }
+        _ => panic!("expected attributed playbar segment"),
+      }
+    });
+  }
+
+  #[test]
+  fn http_callback_error_queues_notify_error_without_breaking_engine() {
+    with_runtime_engine(|engine, url| {
+      let source = format!(
+        r#"
+            spotatui.http_get("{url}", function(resp, err)
+              error("callback boom")
+            end)
+          "#
+      );
+      engine.load_source("bad_fetcher", &source).unwrap();
+
+      engine.inject_http_result(1, Ok(response(200, "ignored")));
+      engine.drain_http_callbacks_for_test();
+
+      match one(engine) {
+        ScriptEffect::NotifyError(msg, 6) => {
+          assert!(msg.contains("bad_fetcher"));
+          assert!(msg.contains("error in http callback"));
+          assert!(msg.contains("callback boom"));
+        }
+        _ => panic!("expected http callback error notify"),
+      }
+      assert!(engine.shared.current_plugin.borrow().is_empty());
+
+      engine
+        .load_source("healthy", r#"spotatui.notify("still alive", 1)"#)
+        .unwrap();
+      match one(engine) {
+        ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "still alive"),
+        _ => panic!("expected engine to keep running"),
+      }
+    });
+  }
+
+  #[test]
+  fn http_get_invalid_scheme_raises() {
+    let mut engine = ScriptEngine::new().unwrap();
+    let result = engine.load_source(
+      "fetcher",
+      r#"spotatui.http_get("ftp://example.com", function() end)"#,
+    );
+    assert!(result.is_err());
+    assert!(result
+      .unwrap_err()
+      .to_string()
+      .contains("unsupported URL scheme"));
+  }
+
+  #[test]
+  fn http_get_no_runtime_raises() {
+    let mut engine = ScriptEngine::new().unwrap();
+    let result = engine.load_source(
+      "fetcher",
+      r#"spotatui.http_get("https://example.com", function() end)"#,
+    );
+    assert!(result.is_err());
+    assert!(result
+      .unwrap_err()
+      .to_string()
+      .contains("no tokio runtime available"));
+  }
+
+  #[test]
+  fn http_resp_ok_true_for_2xx() {
+    with_runtime_engine(|engine, url| {
+      let source = format!(
+        r#"
+            spotatui.http_get("{url}", function(resp, err)
+              spotatui.notify(tostring(resp.ok), 1)
+            end)
+          "#
+      );
+      engine.load_source("fetcher", &source).unwrap();
+
+      engine.inject_http_result(1, Ok(response(204, "")));
+      engine.drain_http_callbacks_for_test();
+
+      match one(engine) {
+        ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "true"),
+        _ => panic!("expected ok=true notify"),
+      }
+    });
+  }
+
+  #[test]
+  fn http_resp_ok_false_for_4xx() {
+    with_runtime_engine(|engine, url| {
+      let source = format!(
+        r#"
+            spotatui.http_get("{url}", function(resp, err)
+              spotatui.notify(tostring(resp.ok) .. ":" .. tostring(err == nil), 1)
+            end)
+          "#
+      );
+      engine.load_source("fetcher", &source).unwrap();
+
+      engine.inject_http_result(1, Ok(response(404, "not found")));
+      engine.drain_http_callbacks_for_test();
+
+      match one(engine) {
+        ScriptEffect::Notify(msg, 1) => assert_eq!(msg, "false:true"),
+        _ => panic!("expected ok=false notify"),
+      }
+    });
   }
 }
 

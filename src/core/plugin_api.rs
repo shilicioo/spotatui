@@ -13,7 +13,7 @@ use crate::infra::media_metadata::current_playback_snapshot;
 use rspotify::model::RepeatState;
 use serde::{Deserialize, Serialize};
 
-pub const API_VERSION: u32 = 2;
+pub const API_VERSION: u32 = 3;
 
 /// A popup dialog produced by a plugin.
 #[derive(Debug, Clone, PartialEq)]

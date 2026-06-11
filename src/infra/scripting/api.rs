@@ -1,16 +1,25 @@
 use std::rc::Rc;
 
 use mlua::{Lua, LuaSerdeExt, Value};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::core::plugin_api::{self, PluginPopup, PopupLine};
 use crate::core::user_config::parse_theme_item;
 
 use super::effects::ScriptEffect;
 use super::events::VALID_EVENT_NAMES;
-use super::shared::{ScriptShared, COMMANDS_KEY, HANDLERS_KEY};
+use super::shared::{
+  HttpResponseData, HttpResult, ScriptShared, COMMANDS_KEY, HANDLERS_KEY, HTTP_CALLBACKS_KEY,
+};
 
 /// Build the `spotatui` global table and its functions.
-pub(super) fn install_api(lua: &Lua, shared: &Rc<ScriptShared>) -> mlua::Result<()> {
+pub(super) fn install_api(
+  lua: &Lua,
+  shared: &Rc<ScriptShared>,
+  http_tx: UnboundedSender<HttpResult>,
+  http_client: reqwest::Client,
+  rt_handle: Option<tokio::runtime::Handle>,
+) -> mlua::Result<()> {
   let tbl = lua.create_table()?;
 
   tbl.set("api_version", plugin_api::API_VERSION)?;
@@ -146,6 +155,76 @@ pub(super) fn install_api(lua: &Lua, shared: &Rc<ScriptShared>) -> mlua::Result<
     tbl.set("log", log)?;
   }
 
+  {
+    let json_decode = lua.create_function(move |lua, json: String| {
+      let value: serde_json::Value = serde_json::from_str(&json).map_err(mlua::Error::external)?;
+      lua.to_value(&value)
+    })?;
+    tbl.set("json_decode", json_decode)?;
+
+    let json_encode = lua.create_function(move |lua, value: Value| {
+      let value: serde_json::Value = lua.from_value(value)?;
+      serde_json::to_string(&value).map_err(mlua::Error::external)
+    })?;
+    tbl.set("json_encode", json_encode)?;
+  }
+
+  // Async HTTP: request tasks send results back to the engine, which owns the Lua state.
+  {
+    let lua_inner = lua.clone();
+    let shared = shared.clone();
+    let tx = http_tx.clone();
+    let client = http_client.clone();
+    let handle = rt_handle.clone();
+    let http_get = lua.create_function(move |_, (url, callback): (String, mlua::Function)| {
+      validate_http_url("spotatui.http_get", &url)?;
+      let handle = handle.clone().ok_or_else(|| {
+        mlua::Error::RuntimeError("spotatui.http_get: no tokio runtime available".to_string())
+      })?;
+      let token = register_http_callback(&lua_inner, &shared, callback)?;
+      let client = client.clone();
+      let tx = tx.clone();
+      handle.spawn(async move {
+        let result = run_http_get(client, url).await;
+        let _ = tx.send((token, result));
+      });
+      Ok(())
+    })?;
+    tbl.set("http_get", http_get)?;
+  }
+
+  {
+    let lua_inner = lua.clone();
+    let shared = shared.clone();
+    let tx = http_tx.clone();
+    let client = http_client.clone();
+    let handle = rt_handle.clone();
+    let http_post = lua.create_function(
+      move |_,
+            (url, body, headers, callback): (
+        String,
+        String,
+        Option<mlua::Table>,
+        mlua::Function,
+      )| {
+        validate_http_url("spotatui.http_post", &url)?;
+        let handle = handle.clone().ok_or_else(|| {
+          mlua::Error::RuntimeError("spotatui.http_post: no tokio runtime available".to_string())
+        })?;
+        let headers = collect_headers(headers)?;
+        let token = register_http_callback(&lua_inner, &shared, callback)?;
+        let client = client.clone();
+        let tx = tx.clone();
+        handle.spawn(async move {
+          let result = run_http_post(client, url, body, headers).await;
+          let _ = tx.send((token, result));
+        });
+        Ok(())
+      },
+    )?;
+    tbl.set("http_post", http_post)?;
+  }
+
   // spotatui.register_command(name, fn)
   {
     let lua_inner = lua.clone();
@@ -252,6 +331,76 @@ pub(super) fn install_api(lua: &Lua, shared: &Rc<ScriptShared>) -> mlua::Result<
 
   lua.globals().set("spotatui", tbl)?;
   Ok(())
+}
+
+fn validate_http_url(function_name: &str, url: &str) -> mlua::Result<()> {
+  let parsed = reqwest::Url::parse(url)
+    .map_err(|e| mlua::Error::RuntimeError(format!("{function_name}: invalid URL '{url}': {e}")))?;
+  match parsed.scheme() {
+    "http" | "https" => Ok(()),
+    scheme => Err(mlua::Error::RuntimeError(format!(
+      "{function_name}: unsupported URL scheme '{scheme}'"
+    ))),
+  }
+}
+
+fn register_http_callback(
+  lua: &Lua,
+  shared: &Rc<ScriptShared>,
+  callback: mlua::Function,
+) -> mlua::Result<u64> {
+  let token = shared
+    .next_http_token
+    .get()
+    .checked_add(1)
+    .ok_or_else(|| mlua::Error::RuntimeError("spotatui.http: token overflow".to_string()))?;
+  let key = i64::try_from(token)
+    .map_err(|_| mlua::Error::RuntimeError("spotatui.http: token overflow".to_string()))?;
+  shared.next_http_token.set(token);
+
+  let callbacks: mlua::Table = lua.named_registry_value(HTTP_CALLBACKS_KEY)?;
+  let entry = lua.create_table()?;
+  entry.set("plugin", shared.current_plugin.borrow().clone())?;
+  entry.set("callback", callback)?;
+  callbacks.raw_set(key, entry)?;
+  Ok(token)
+}
+
+fn collect_headers(headers: Option<mlua::Table>) -> mlua::Result<Vec<(String, String)>> {
+  let Some(headers) = headers else {
+    return Ok(Vec::new());
+  };
+  let mut out = Vec::new();
+  for pair in headers.pairs::<String, String>() {
+    out.push(pair?);
+  }
+  Ok(out)
+}
+
+async fn run_http_get(client: reqwest::Client, url: String) -> Result<HttpResponseData, String> {
+  let response = client.get(url).send().await.map_err(|e| e.to_string())?;
+  response_data(response).await
+}
+
+async fn run_http_post(
+  client: reqwest::Client,
+  url: String,
+  body: String,
+  headers: Vec<(String, String)>,
+) -> Result<HttpResponseData, String> {
+  let mut request = client.post(url).body(body);
+  for (key, value) in headers {
+    request = request.header(key, value);
+  }
+  let response = request.send().await.map_err(|e| e.to_string())?;
+  response_data(response).await
+}
+
+async fn response_data(response: reqwest::Response) -> Result<HttpResponseData, String> {
+  let status = response.status().as_u16();
+  let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+  let body = String::from_utf8_lossy(&bytes).into_owned();
+  Ok(HttpResponseData { status, body })
 }
 
 /// Parse the `lines` argument for `spotatui.popup`.

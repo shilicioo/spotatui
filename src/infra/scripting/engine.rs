@@ -3,6 +3,9 @@ use std::path::Path;
 use std::rc::Rc;
 
 use mlua::{Lua, LuaSerdeExt, Value};
+#[cfg(test)]
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 use crate::core::app::App;
 use crate::core::plugin_api;
@@ -10,7 +13,9 @@ use crate::core::plugin_api;
 use super::api::install_api;
 use super::effects::{apply_effects, ScriptEffect};
 use super::events::{diff_events, queue_uris, ScriptEvent};
-use super::shared::{ScriptShared, COMMANDS_KEY, HANDLERS_KEY};
+use super::shared::{
+  HttpResponseData, HttpResult, ScriptShared, COMMANDS_KEY, HANDLERS_KEY, HTTP_CALLBACKS_KEY,
+};
 
 pub struct ScriptEngine {
   pub(super) lua: Lua,
@@ -19,6 +24,9 @@ pub struct ScriptEngine {
   last_playback: Option<crate::core::plugin_api::PlaybackState>,
   /// Previous queue item uris, for diffing on tick.
   last_queue: Option<Vec<String>>,
+  http_rx: UnboundedReceiver<HttpResult>,
+  #[cfg(test)]
+  http_tx: UnboundedSender<HttpResult>,
 }
 
 impl ScriptEngine {
@@ -26,6 +34,13 @@ impl ScriptEngine {
   pub fn new() -> mlua::Result<Self> {
     let lua = Lua::new();
     let shared = Rc::new(ScriptShared::new());
+    let (http_tx, http_rx) = unbounded_channel();
+    let http_client = reqwest::Client::builder()
+      .timeout(std::time::Duration::from_secs(30))
+      .user_agent(format!("spotatui/{}", env!("CARGO_PKG_VERSION")))
+      .build()
+      .map_err(mlua::Error::external)?;
+    let rt_handle = tokio::runtime::Handle::try_current().ok();
 
     // Registry handler table: { event_name = { {plugin=, callback=}, ... } }.
     let handlers = lua.create_table()?;
@@ -35,13 +50,20 @@ impl ScriptEngine {
     let commands = lua.create_table()?;
     lua.set_named_registry_value(COMMANDS_KEY, commands)?;
 
-    install_api(&lua, &shared)?;
+    // Registry HTTP callback table: { token = { plugin=, callback= } }.
+    let http_callbacks = lua.create_table()?;
+    lua.set_named_registry_value(HTTP_CALLBACKS_KEY, http_callbacks)?;
+
+    install_api(&lua, &shared, http_tx.clone(), http_client, rt_handle)?;
 
     Ok(ScriptEngine {
       lua,
       shared,
       last_playback: None,
       last_queue: None,
+      http_rx,
+      #[cfg(test)]
+      http_tx,
     })
   }
 
@@ -134,13 +156,16 @@ impl ScriptEngine {
   pub fn on_start(&mut self, app: &mut App) {
     self.refresh_caches(app);
     self.emit(ScriptEvent::Start);
+    self.drain_http_callbacks();
     self.drain_effects(app);
   }
 
   /// On tick: if there are no handlers at all, return cheaply. Otherwise refresh caches,
   /// diff against the previous snapshot, emit each derived event, then drain.
   pub fn on_tick(&mut self, app: &mut App) {
+    self.drain_http_callbacks();
     if !self.has_any_handlers() {
+      self.drain_effects(app);
       return;
     }
 
@@ -163,6 +188,7 @@ impl ScriptEngine {
     for ev in events {
       self.emit(ev);
     }
+    self.drain_http_callbacks();
     self.drain_effects(app);
   }
 
@@ -273,6 +299,8 @@ impl ScriptEngine {
   /// Run any commands queued in `app.pending_plugin_commands`, then drain effects.
   pub fn run_pending_commands(&mut self, app: &mut App) {
     if app.pending_plugin_commands.is_empty() {
+      self.drain_http_callbacks();
+      self.drain_effects(app);
       return;
     }
     self.refresh_caches(app);
@@ -280,6 +308,7 @@ impl ScriptEngine {
     let commands: mlua::Table = match self.lua.named_registry_value(COMMANDS_KEY) {
       Ok(t) => t,
       Err(_) => {
+        self.drain_http_callbacks();
         self.drain_effects(app);
         return;
       }
@@ -334,7 +363,117 @@ impl ScriptEngine {
         }
       }
     }
+    self.drain_http_callbacks();
     self.drain_effects(app);
+  }
+
+  fn drain_http_callbacks(&mut self) {
+    while let Ok((token, result)) = self.http_rx.try_recv() {
+      self.deliver_http_result(token, result);
+    }
+  }
+
+  fn deliver_http_result(&mut self, token: u64, result: Result<HttpResponseData, String>) {
+    let callbacks: mlua::Table = match self.lua.named_registry_value(HTTP_CALLBACKS_KEY) {
+      Ok(t) => t,
+      Err(_) => return,
+    };
+    let key = match i64::try_from(token) {
+      Ok(key) => key,
+      Err(_) => return,
+    };
+    let entry: mlua::Table = match callbacks.raw_get::<Option<mlua::Table>>(key) {
+      Ok(Some(t)) => t,
+      _ => return,
+    };
+    let plugin: String = entry.get("plugin").unwrap_or_default();
+    let callback: mlua::Function = match entry.get("callback") {
+      Ok(f) => f,
+      Err(_) => {
+        let _ = callbacks.raw_set(key, Value::Nil);
+        return;
+      }
+    };
+    let _ = callbacks.raw_set(key, Value::Nil);
+    drop(entry);
+    drop(callbacks);
+
+    let args = match self.http_callback_args(result) {
+      Ok(args) => args,
+      Err(e) => {
+        let msg = first_line(&e.to_string());
+        log::error!("[lua] plugin '{plugin}': error preparing http callback: {msg}");
+        self
+          .shared
+          .effects
+          .borrow_mut()
+          .push(ScriptEffect::NotifyError(
+            format!("plugin '{plugin}': error preparing http callback: {msg}"),
+            6,
+          ));
+        return;
+      }
+    };
+
+    *self.shared.current_plugin.borrow_mut() = plugin.clone();
+    let call_result = catch_unwind(AssertUnwindSafe(|| callback.call::<()>(args)));
+    self.shared.current_plugin.borrow_mut().clear();
+
+    match call_result {
+      Ok(Ok(())) => {}
+      Ok(Err(e)) => {
+        let msg = first_line(&e.to_string());
+        log::error!("[lua] plugin '{plugin}': error in http callback: {msg}");
+        self
+          .shared
+          .effects
+          .borrow_mut()
+          .push(ScriptEffect::NotifyError(
+            format!("plugin '{plugin}': error in http callback: {msg}"),
+            6,
+          ));
+      }
+      Err(_) => {
+        log::error!("[lua] plugin '{plugin}': panic in http callback");
+        self
+          .shared
+          .effects
+          .borrow_mut()
+          .push(ScriptEffect::NotifyError(
+            format!("plugin '{plugin}': panic in http callback"),
+            6,
+          ));
+      }
+    }
+  }
+
+  fn http_callback_args(
+    &self,
+    result: Result<HttpResponseData, String>,
+  ) -> mlua::Result<(Value, Value)> {
+    match result {
+      Ok(data) => {
+        let resp = self.lua.create_table()?;
+        resp.set("status", data.status)?;
+        resp.set("ok", (200..=299).contains(&data.status))?;
+        resp.set("body", data.body)?;
+        Ok((Value::Table(resp), Value::Nil))
+      }
+      Err(err) => Ok((Value::Nil, Value::String(self.lua.create_string(&err)?))),
+    }
+  }
+
+  #[cfg(test)]
+  pub(super) fn inject_http_result(&self, token: u64, result: Result<HttpResponseData, String>) {
+    self
+      .http_tx
+      .send((token, result))
+      .expect("test HTTP result receiver should be alive");
+  }
+
+  #[cfg(test)]
+  pub(super) fn drain_http_callbacks_for_test(&mut self) {
+    self.drain_http_callbacks();
   }
 
   /// Drain queued effects into the app while holding `&mut App`.
