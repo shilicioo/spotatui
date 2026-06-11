@@ -175,12 +175,8 @@ fn should_activate_native_for_playback(context: NativeActivationContext) -> bool
 
 #[cfg(feature = "streaming")]
 fn is_no_active_device_error(e: &anyhow::Error) -> bool {
-  let text = e.to_string();
-  text.contains("NO_ACTIVE_DEVICE")
-    || text.contains("No active device")
-    || text.contains("no active device")
-    || text.contains("404")
-    || text.contains("Not Found")
+  let text = e.to_string().to_ascii_lowercase();
+  text.contains("no_active_device") || text.contains("no active device")
 }
 
 fn api_confirms_native_info_is_current(
@@ -268,13 +264,7 @@ async fn is_native_streaming_active_for_playback(network: &Network) -> bool {
   // player is connected but stopped/not active.
   if let Some(native_name) = native_device_name.as_ref() {
     let current_device_name = ctx.device.name.to_lowercase();
-    if current_device_name == native_name.as_str()
-      && (app.native_track_info.is_some()
-        || app.native_is_playing == Some(true)
-        || app
-          .last_device_activation
-          .is_some_and(|instant| instant.elapsed() < Duration::from_secs(5)))
-    {
+    if current_device_name == native_name.as_str() && app.has_fresh_native_activity() {
       return true;
     }
   }
@@ -313,11 +303,7 @@ async fn should_activate_native_streaming_for_playback(network: &Network) -> boo
   let current_device_id = current_device.and_then(|device| device.id.as_deref());
   let current_device_name_matches_native =
     current_device.is_some_and(|device| device.name.eq_ignore_ascii_case(native_name));
-  let native_has_fresh_activity = app.native_track_info.is_some()
-    || app.native_is_playing == Some(true)
-    || app
-      .last_device_activation
-      .is_some_and(|instant| instant.elapsed() < Duration::from_secs(5));
+  let native_has_fresh_activity = app.has_fresh_native_activity();
 
   let saved_device_matches_native = saved_device_id.is_some_and(|saved| {
     native_device_id == Some(saved)
@@ -492,12 +478,7 @@ impl PlaybackNetwork for Network {
           }
 
           let native_name = p.device_name().to_lowercase();
-          c.device.name.to_lowercase() == native_name
-            && (app.native_track_info.is_some()
-              || app.native_is_playing == Some(true)
-              || app
-                .last_device_activation
-                .is_some_and(|instant| instant.elapsed() < Duration::from_secs(5)))
+          c.device.name.to_lowercase() == native_name && app.has_fresh_native_activity()
         });
 
         #[cfg(feature = "streaming")]
@@ -1677,6 +1658,29 @@ mod tests {
       &item,
       Some("0000000000000000000002")
     ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn no_active_device_error_matches_spotify_no_device_signals() {
+    assert!(is_no_active_device_error(&anyhow!(
+      "{}",
+      r#"Spotify API 404 Not Found failed: {"error":{"reason":"NO_ACTIVE_DEVICE"}}"#
+    )));
+    assert!(is_no_active_device_error(&anyhow!(
+      "Spotify API 404 Not Found failed: No active device found"
+    )));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn no_active_device_error_does_not_match_generic_not_found() {
+    assert!(!is_no_active_device_error(&anyhow!(
+      "Spotify API 404 Not Found failed: playlist not found"
+    )));
+    assert!(!is_no_active_device_error(&anyhow!(
+      "Spotify API 404 failed for https://example.test/404"
+    )));
   }
 
   #[cfg(feature = "streaming")]
