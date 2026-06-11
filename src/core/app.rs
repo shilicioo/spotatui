@@ -57,6 +57,9 @@ const DEFAULT_ROUTE: Route = Route {
 /// This prevents the UI from jumping back to old positions while the seek completes
 pub const SEEK_POSITION_IGNORE_MS: u128 = 500;
 
+#[cfg(feature = "streaming")]
+const FRESH_NATIVE_ACTIVITY_WINDOW: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct ScrollableResultPages<T> {
   pub index: usize,
@@ -2089,6 +2092,15 @@ impl App {
     self.api_error = e.to_string();
   }
 
+  #[cfg(feature = "streaming")]
+  pub fn has_fresh_native_activity(&self) -> bool {
+    self.native_track_info.is_some()
+      || self.native_is_playing == Some(true)
+      || self
+        .last_device_activation
+        .is_some_and(|instant| instant.elapsed() < FRESH_NATIVE_ACTIVITY_WINDOW)
+  }
+
   /// Check if native streaming is the active playback device
   /// Returns true only if the player is connected AND it's the currently active device
   #[cfg(feature = "streaming")]
@@ -2124,10 +2136,13 @@ impl App {
       }
     }
 
-    // Fallback: strict name match (case-insensitive)
+    // Fallback: strict name match (case-insensitive), but only while we have
+    // fresh native activity or a recent explicit activation. After a recovery,
+    // Spotify can keep returning the old "spotatui" device while the new native
+    // player is connected but stopped/not active.
     if let Some(native_name) = native_device_name.as_ref() {
       let current_device_name = ctx.device.name.to_lowercase();
-      if current_device_name == native_name.as_str() {
+      if current_device_name == native_name.as_str() && self.has_fresh_native_activity() {
         return true;
       }
     }
@@ -4315,6 +4330,46 @@ mod tests {
       track_number: 1,
       r#type: rspotify::model::Type::Track,
     }
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn fresh_native_activity_is_true_when_native_metadata_exists() {
+    let mut app = App {
+      native_track_info: Some(NativeTrackInfo::default()),
+      ..Default::default()
+    };
+
+    assert!(app.has_fresh_native_activity());
+
+    app.native_track_info = None;
+    assert!(!app.has_fresh_native_activity());
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn fresh_native_activity_is_true_when_native_is_playing() {
+    let app = App {
+      native_is_playing: Some(true),
+      ..Default::default()
+    };
+
+    assert!(app.has_fresh_native_activity());
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn fresh_native_activity_uses_recent_activation_window() {
+    let mut app = App {
+      last_device_activation: Some(Instant::now()),
+      ..Default::default()
+    };
+
+    assert!(app.has_fresh_native_activity());
+
+    app.last_device_activation = Some(Instant::now() - Duration::from_secs(6));
+
+    assert!(!app.has_fresh_native_activity());
   }
 
   fn saved_track(id: &str, name: &str) -> SavedTrack {

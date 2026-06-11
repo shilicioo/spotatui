@@ -610,7 +610,7 @@ fn current_playback_matches_native(app: &App, player: &StreamingPlayer) -> bool 
     }
   }
 
-  ctx.device.name.eq_ignore_ascii_case(player.device_name())
+  ctx.device.name.eq_ignore_ascii_case(player.device_name()) && app.has_fresh_native_activity()
 }
 
 async fn disconnect_streaming_player(
@@ -643,9 +643,9 @@ async fn disconnect_streaming_player(
   app_lock.last_track_id = None;
   app_lock.last_device_activation = None;
   app_lock.seek_ms = None;
-  if reselect_device {
-    app_lock.current_playback_context = None;
-  }
+  // The cached API context may still point at the stale native session; the
+  // dispatch below repopulates it if Spotify has already moved to another device.
+  app_lock.current_playback_context = None;
   app_lock.set_status_message(status_message, 8);
   app_lock.dispatch(IoEvent::GetCurrentPlayback);
 
