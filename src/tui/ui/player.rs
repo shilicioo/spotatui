@@ -824,6 +824,12 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
         };
         title_spans.push(Span::styled(format!(" | {}", message), msg_style));
       }
+      for seg in app.plugin_playbar_segments.values() {
+        title_spans.push(Span::styled(
+          format!(" | {}", seg),
+          Style::default().fg(app.user_config.theme.playbar_text),
+        ));
+      }
 
       let title_block = Block::default()
         .borders(Borders::ALL)

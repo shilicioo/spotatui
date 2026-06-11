@@ -20,7 +20,7 @@ A global table named `spotatui` is available in every plugin.
 
 ### Constants
 
-- `spotatui.api_version` - integer API version (currently `1`).
+- `spotatui.api_version` - integer API version (currently `2`).
 
 ### Events
 
@@ -81,6 +81,106 @@ native streaming fast paths (librespot) when the native player is active.
 ### Logging
 
 - `spotatui.log(msg)` - write an info-level line to the app log.
+
+## Commands and keybindings
+
+`spotatui.register_command(name, fn)` registers a named, callable action. The name must be a
+non-empty string with no whitespace. Registering the same name twice (from any plugin) raises a
+Lua error at load time.
+
+```lua
+spotatui.register_command("toggle_lyrics", function()
+  spotatui.notify("lyrics toggled", 3)
+end)
+```
+
+To bind a command to a key, add a `plugin_commands` section to `config.yml`:
+
+```yaml
+plugin_commands:
+  toggle_lyrics: "ctrl-l"
+  show_stats: "ctrl-g"
+```
+
+Each entry maps a command name to a key string. The key string uses the same format as the
+built-in keybindings (e.g. `ctrl-l`, `alt-x`, `f1`, `space`). Entries are silently skipped when
+the key string is invalid, the key is a reserved navigation key, or the key already has a named
+action bound to it. The remaining entries are loaded normally.
+
+When the bound key is pressed, the corresponding command callback fires after the current key
+handler returns. An error in the callback is reported as a highlighted status message (6-second
+ttl) and logged, but the command stays registered -- a transient failure does not permanently
+unbind a key.
+
+Plugin authors should document a suggested binding in their plugin rather than shipping one
+in config. Command names are decoupled from keys by design: the user decides which key to use.
+
+## UI extension
+
+### Playbar segment
+
+`spotatui.set_playbar(text)` sets a persistent text segment for the calling plugin, shown in
+the playbar title as `" | {text}"` after any status message. Each plugin has its own segment
+slot; calling `set_playbar` again replaces it. Pass `nil` to clear the segment.
+
+```lua
+spotatui.on("track_change", function(pb)
+  if pb and pb.track then
+    spotatui.set_playbar(pb.track.name)
+  else
+    spotatui.set_playbar(nil)
+  end
+end)
+```
+
+The segment persists until the plugin explicitly clears it. Multiple plugins each show their
+own segment in alphabetical plugin-name order.
+
+### Popup
+
+`spotatui.popup(title, lines)` opens a centered modal dialog. The dialog overlays every
+screen, including the help menu and queue. Press `j`/Down to scroll down, `k`/Up to scroll
+up, and `Esc` or `q` to close. All other keys are swallowed while the popup is open.
+
+`lines` can be:
+- A single string.
+- An array where each item is a string or a table `{ text, fg?, bold?, italic? }`.
+  - `fg` is a color string in the same format as `config.yml` theme values (e.g. `"Red"`,
+    `"Magenta"`, `"0, 200, 200"`).
+  - `bold` and `italic` are booleans (default `false`).
+  - Missing `text`, an unparseable color, or a non-string/non-table item raises a Lua error.
+
+```lua
+spotatui.popup("Track info", {
+  { text = "Now playing", bold = true },
+  { text = "Song title here", fg = "Cyan" },
+  "",
+  "Press Esc to close",
+})
+```
+
+### Theme overrides
+
+`spotatui.set_theme(tbl)` applies runtime color overrides to the active theme. Keys are
+theme field names and values are color strings. Changes are applied immediately and affect all
+subsequent renders. They are never written back to `config.yml` -- they are runtime-only and
+reset on app restart.
+
+Valid field names: `active`, `banner`, `error_border`, `error_text`, `hint`, `hovered`,
+`inactive`, `playbar_background`, `playbar_progress`, `playbar_progress_text`, `playbar_text`,
+`selected`, `text`, `background`, `header`, `highlighted_lyrics`, `analysis_bar`,
+`analysis_bar_text`.
+
+Color string format is the same as in `config.yml` (named ANSI color or `"r, g, b"`).
+
+An unknown field name or an invalid color raises a Lua error.
+
+```lua
+spotatui.set_theme({
+  playbar_text = "Magenta",
+  hint = "0, 200, 0",
+})
+```
 
 ## Error behavior
 

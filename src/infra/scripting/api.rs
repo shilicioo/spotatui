@@ -2,11 +2,12 @@ use std::rc::Rc;
 
 use mlua::{Lua, LuaSerdeExt, Value};
 
-use crate::core::plugin_api;
+use crate::core::plugin_api::{self, PluginPopup, PopupLine};
+use crate::core::user_config::parse_theme_item;
 
 use super::effects::ScriptEffect;
 use super::events::VALID_EVENT_NAMES;
-use super::shared::{ScriptShared, HANDLERS_KEY};
+use super::shared::{ScriptShared, COMMANDS_KEY, HANDLERS_KEY};
 
 /// Build the `spotatui` global table and its functions.
 pub(super) fn install_api(lua: &Lua, shared: &Rc<ScriptShared>) -> mlua::Result<()> {
@@ -145,8 +146,176 @@ pub(super) fn install_api(lua: &Lua, shared: &Rc<ScriptShared>) -> mlua::Result<
     tbl.set("log", log)?;
   }
 
+  // spotatui.register_command(name, fn)
+  {
+    let lua_inner = lua.clone();
+    let shared = shared.clone();
+    let register_command =
+      lua.create_function(move |_, (name, callback): (String, mlua::Function)| {
+        if name.is_empty() || name.contains(char::is_whitespace) {
+          return Err(mlua::Error::RuntimeError(
+            "spotatui.register_command: name must be a non-empty string without whitespace"
+              .to_string(),
+          ));
+        }
+        let commands: mlua::Table = lua_inner.named_registry_value(COMMANDS_KEY)?;
+        if commands.get::<Option<mlua::Table>>(name.clone())?.is_some() {
+          return Err(mlua::Error::RuntimeError(format!(
+            "spotatui.register_command: command '{name}' is already registered"
+          )));
+        }
+        let entry = lua_inner.create_table()?;
+        entry.set("plugin", shared.current_plugin.borrow().clone())?;
+        entry.set("callback", callback)?;
+        commands.set(name, entry)?;
+        Ok(())
+      })?;
+    tbl.set("register_command", register_command)?;
+  }
+
+  // spotatui.set_playbar(text_or_nil)
+  {
+    let shared = shared.clone();
+    let set_playbar = lua.create_function(move |_, text: Option<String>| {
+      let plugin = shared.current_plugin.borrow().clone();
+      shared
+        .effects
+        .borrow_mut()
+        .push(ScriptEffect::SetPlaybarSegment { plugin, text });
+      Ok(())
+    })?;
+    tbl.set("set_playbar", set_playbar)?;
+  }
+
+  // spotatui.popup(title, lines)
+  {
+    let shared = shared.clone();
+    let popup = lua.create_function(move |_, (title, lines_val): (String, mlua::Value)| {
+      let lines = parse_popup_lines(lines_val)?;
+      shared
+        .effects
+        .borrow_mut()
+        .push(ScriptEffect::ShowPopup(PluginPopup { title, lines }));
+      Ok(())
+    })?;
+    tbl.set("popup", popup)?;
+  }
+
+  // spotatui.set_theme(tbl)
+  {
+    let shared = shared.clone();
+    let set_theme = lua.create_function(move |_, tbl: mlua::Table| {
+      let mut pairs: Vec<(String, ratatui::style::Color)> = Vec::new();
+      for pair in tbl.pairs::<String, String>() {
+        let (field, color_str) = pair?;
+        // Validate field name
+        const VALID_FIELDS: &[&str] = &[
+          "active",
+          "banner",
+          "error_border",
+          "error_text",
+          "hint",
+          "hovered",
+          "inactive",
+          "playbar_background",
+          "playbar_progress",
+          "playbar_progress_text",
+          "playbar_text",
+          "selected",
+          "text",
+          "background",
+          "header",
+          "highlighted_lyrics",
+          "analysis_bar",
+          "analysis_bar_text",
+        ];
+        if !VALID_FIELDS.contains(&field.as_str()) {
+          return Err(mlua::Error::RuntimeError(format!(
+            "spotatui.set_theme: unknown theme field '{field}'"
+          )));
+        }
+        let color = parse_theme_item(&color_str).map_err(|e| {
+          mlua::Error::RuntimeError(format!(
+            "spotatui.set_theme: invalid color for field '{field}': {e}"
+          ))
+        })?;
+        pairs.push((field, color));
+      }
+      shared
+        .effects
+        .borrow_mut()
+        .push(ScriptEffect::SetTheme(pairs));
+      Ok(())
+    })?;
+    tbl.set("set_theme", set_theme)?;
+  }
+
   lua.globals().set("spotatui", tbl)?;
   Ok(())
+}
+
+/// Parse the `lines` argument for `spotatui.popup`.
+///
+/// Accepts: a single string, or an array whose items are each a string or a table
+/// `{ text, fg?, bold?, italic? }`.
+fn parse_popup_lines(val: mlua::Value) -> mlua::Result<Vec<PopupLine>> {
+  match val {
+    mlua::Value::String(s) => Ok(vec![PopupLine {
+      text: s.to_str()?.to_string(),
+      fg: None,
+      bold: false,
+      italic: false,
+    }]),
+    mlua::Value::Table(tbl) => {
+      let mut lines = Vec::new();
+      for item in tbl.sequence_values::<mlua::Value>() {
+        let item = item?;
+        match item {
+          mlua::Value::String(s) => lines.push(PopupLine {
+            text: s.to_str()?.to_string(),
+            fg: None,
+            bold: false,
+            italic: false,
+          }),
+          mlua::Value::Table(t) => {
+            let text: Option<String> = t.get("text")?;
+            let text = text.ok_or_else(|| {
+              mlua::Error::RuntimeError(
+                "spotatui.popup: each line table must have a 'text' field".to_string(),
+              )
+            })?;
+            let fg_str: Option<String> = t.get("fg")?;
+            let fg = fg_str
+              .map(|s| {
+                parse_theme_item(&s).map_err(|e| {
+                  mlua::Error::RuntimeError(format!("spotatui.popup: invalid color '{}': {}", s, e))
+                })
+              })
+              .transpose()?;
+            let bold: bool = t.get::<Option<bool>>("bold")?.unwrap_or(false);
+            let italic: bool = t.get::<Option<bool>>("italic")?.unwrap_or(false);
+            lines.push(PopupLine {
+              text,
+              fg,
+              bold,
+              italic,
+            });
+          }
+          other => {
+            return Err(mlua::Error::RuntimeError(format!(
+              "spotatui.popup: each line must be a string or table, got {}",
+              other.type_name()
+            )));
+          }
+        }
+      }
+      Ok(lines)
+    }
+    other => Err(mlua::Error::RuntimeError(format!(
+      "spotatui.popup: lines must be a string or array, got {}",
+      other.type_name()
+    ))),
+  }
 }
 
 /// Install a no-argument action that pushes a fixed effect.

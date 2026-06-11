@@ -988,6 +988,14 @@ pub struct App {
   pub create_playlist_search_cursor: u16,
   pub create_playlist_selected_result: usize,
   pub create_playlist_focus: CreatePlaylistFocus,
+  /// Commands queued by keybindings for the scripting engine to run.
+  pub pending_plugin_commands: Vec<String>,
+  /// Per-plugin playbar segments, keyed by plugin name (BTreeMap for deterministic order).
+  pub plugin_playbar_segments: std::collections::BTreeMap<String, String>,
+  /// Currently displayed plugin popup, if any.
+  pub plugin_popup: Option<crate::core::plugin_api::PluginPopup>,
+  /// Scroll offset for the plugin popup.
+  pub plugin_popup_scroll: u16,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1191,6 +1199,10 @@ impl Default for App {
       create_playlist_search_cursor: 0,
       create_playlist_selected_result: 0,
       create_playlist_focus: CreatePlaylistFocus::SearchInput,
+      pending_plugin_commands: Vec::new(),
+      plugin_playbar_segments: std::collections::BTreeMap::new(),
+      plugin_popup: None,
+      plugin_popup_scroll: 0,
     }
   }
 }
@@ -1403,6 +1415,12 @@ impl App {
     self.status_message = Some(message.into());
     self.status_message_expires_at = Some(Instant::now() + Duration::from_secs(ttl_secs));
     self.status_message_is_error = false;
+  }
+
+  /// Queue a plugin command name to be executed by the scripting engine.
+  #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+  pub fn queue_plugin_command(&mut self, name: String) {
+    self.pending_plugin_commands.push(name);
   }
 
   /// Set an error status message. Errors always replace whatever is currently shown

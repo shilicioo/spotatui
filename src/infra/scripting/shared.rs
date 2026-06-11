@@ -7,6 +7,9 @@ use super::effects::ScriptEffect;
 /// Registry key for the table mapping event name -> array of `{ plugin, callback }`.
 pub(super) const HANDLERS_KEY: &str = "spotatui.handlers";
 
+/// Registry key for the table mapping command name -> `{ plugin, callback }`.
+pub(super) const COMMANDS_KEY: &str = "spotatui.commands";
+
 /// State shared between the engine and the Lua closures via `Rc`.
 ///
 /// `mlua` is built without the `send` feature, so `Rc`/`RefCell` are fine here: everything

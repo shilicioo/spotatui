@@ -10,7 +10,7 @@ use crate::core::plugin_api;
 use super::api::install_api;
 use super::effects::{apply_effects, ScriptEffect};
 use super::events::{diff_events, queue_uris, ScriptEvent};
-use super::shared::{ScriptShared, HANDLERS_KEY};
+use super::shared::{ScriptShared, COMMANDS_KEY, HANDLERS_KEY};
 
 pub struct ScriptEngine {
   pub(super) lua: Lua,
@@ -30,6 +30,10 @@ impl ScriptEngine {
     // Registry handler table: { event_name = { {plugin=, callback=}, ... } }.
     let handlers = lua.create_table()?;
     lua.set_named_registry_value(HANDLERS_KEY, handlers)?;
+
+    // Registry commands table: { command_name = { plugin=, callback= } }.
+    let commands = lua.create_table()?;
+    lua.set_named_registry_value(COMMANDS_KEY, commands)?;
 
     install_api(&lua, &shared)?;
 
@@ -225,7 +229,9 @@ impl ScriptEngine {
       };
 
       let arg = arg.clone();
+      *self.shared.current_plugin.borrow_mut() = plugin.clone();
       let call_result = catch_unwind(AssertUnwindSafe(|| callback.call::<()>(arg)));
+      self.shared.current_plugin.borrow_mut().clear();
 
       let err_msg = match call_result {
         Ok(Ok(())) => None,
@@ -262,6 +268,73 @@ impl ScriptEngine {
       Some(state) => self.lua.to_value(&state).unwrap_or(Value::Nil),
       None => Value::Nil,
     }
+  }
+
+  /// Run any commands queued in `app.pending_plugin_commands`, then drain effects.
+  pub fn run_pending_commands(&mut self, app: &mut App) {
+    if app.pending_plugin_commands.is_empty() {
+      return;
+    }
+    self.refresh_caches(app);
+    let names: Vec<String> = app.pending_plugin_commands.drain(..).collect();
+    let commands: mlua::Table = match self.lua.named_registry_value(COMMANDS_KEY) {
+      Ok(t) => t,
+      Err(_) => {
+        self.drain_effects(app);
+        return;
+      }
+    };
+    for name in names {
+      let entry: mlua::Table = match commands.get::<Option<mlua::Table>>(name.clone()) {
+        Ok(Some(t)) => t,
+        _ => {
+          self
+            .shared
+            .effects
+            .borrow_mut()
+            .push(ScriptEffect::NotifyError(
+              format!("no plugin command named '{name}'"),
+              6,
+            ));
+          continue;
+        }
+      };
+      let plugin: String = entry.get("plugin").unwrap_or_default();
+      let callback: mlua::Function = match entry.get("callback") {
+        Ok(f) => f,
+        Err(_) => continue,
+      };
+      *self.shared.current_plugin.borrow_mut() = plugin.clone();
+      let call_result = catch_unwind(AssertUnwindSafe(|| callback.call::<()>(())));
+      self.shared.current_plugin.borrow_mut().clear();
+      match call_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+          let msg = first_line(&e.to_string());
+          log::error!("[lua] plugin '{plugin}': error in command '{name}': {msg}");
+          self
+            .shared
+            .effects
+            .borrow_mut()
+            .push(ScriptEffect::NotifyError(
+              format!("plugin '{plugin}': error in command '{name}': {msg}"),
+              6,
+            ));
+        }
+        Err(_) => {
+          log::error!("[lua] plugin '{plugin}': panic in command '{name}'");
+          self
+            .shared
+            .effects
+            .borrow_mut()
+            .push(ScriptEffect::NotifyError(
+              format!("plugin '{plugin}': panic in command '{name}'"),
+              6,
+            ));
+        }
+      }
+    }
+    self.drain_effects(app);
   }
 
   /// Drain queued effects into the app while holding `&mut App`.

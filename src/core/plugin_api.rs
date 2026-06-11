@@ -13,7 +13,23 @@ use crate::infra::media_metadata::current_playback_snapshot;
 use rspotify::model::RepeatState;
 use serde::{Deserialize, Serialize};
 
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
+
+/// A popup dialog produced by a plugin.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginPopup {
+  pub title: String,
+  pub lines: Vec<PopupLine>,
+}
+
+/// A single line in a [`PluginPopup`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PopupLine {
+  pub text: String,
+  pub fg: Option<ratatui::style::Color>,
+  pub bold: bool,
+  pub italic: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackInfo {
