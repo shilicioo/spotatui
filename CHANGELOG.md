@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.39.1] 2026-06-12
+
+### Fixed
+
+- **Self-update silently failing since v0.38.5**: Release-asset downloads during update checksum verification now send a `User-Agent` header (GitHub rejects requests without one with `403 Forbidden`) and `Accept: application/octet-stream` (without it the asset API URL returns JSON metadata instead of the file), so auto-update and `spotatui update --install` work again. Auto-update failures are now logged instead of silently discarded, and `spotatui update` runs on a blocking thread so it can no longer panic the async runtime. Clients on v0.38.5 through v0.39.0 carry the broken verification in their own binaries and need one manual update to reach this release ([#303](https://github.com/LargeModGames/spotatui/pull/303)).
+
 ## [v0.39.0] 2026-06-12
 
 ### Added

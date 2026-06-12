@@ -2,6 +2,15 @@
   "version": 1,
   "announcements": [
     {
+      "id": "2026-06-12-self-update-broken",
+      "title": "Action needed: auto-update is broken in v0.38.5 to v0.39.0",
+      "body": "A bug in update checksum verification means spotatui v0.38.5 through v0.39.0 cannot update themselves: the update check fails silently on every launch. The fix ships in v0.39.1, but affected versions cannot reach it on their own. Please update once manually (winget upgrade, brew upgrade, your package manager, or the GitHub releases page). Auto-update works again from v0.39.1 onward.",
+      "level": "warning",
+      "url": "https://github.com/LargeModGames/spotatui/pull/303",
+      "starts_at": "2026-06-12T00:00:00Z",
+      "ends_at": null
+    },
+    {
       "id": "2026-06-12-lua-scripting",
       "title": "New: Lua plugin scripting",
       "body": "spotatui now supports Lua plugins, letting you extend and automate the app with your own scripts. Use `spotatui plugin new` to scaffold a plugin, then hook into the plugin API to add custom behavior. See the docs to get started, and share what you build with the spotatui-plugin topic on GitHub.",

@@ -482,10 +482,12 @@ fn add_self_update_cli(clap_app: ClapApp) -> ClapApp {
 }
 
 #[cfg(feature = "self-update")]
-fn handle_self_update_command(matches: &ArgMatches) -> Result<bool> {
+async fn handle_self_update_command(matches: &ArgMatches) -> Result<bool> {
   if let Some(update_matches) = matches.subcommand_matches("update") {
     let do_install = update_matches.get_flag("install");
-    cli::check_for_update(do_install)?;
+    // Must use spawn_blocking because self_update uses reqwest::blocking internally,
+    // which creates its own tokio runtime and panics if called from an async context.
+    tokio::task::spawn_blocking(move || cli::check_for_update(do_install)).await??;
     return Ok(true);
   }
 
@@ -493,7 +495,7 @@ fn handle_self_update_command(matches: &ArgMatches) -> Result<bool> {
 }
 
 #[cfg(not(feature = "self-update"))]
-fn handle_self_update_command(_matches: &ArgMatches) -> Result<bool> {
+async fn handle_self_update_command(_matches: &ArgMatches) -> Result<bool> {
   Ok(false)
 }
 
@@ -513,10 +515,18 @@ async fn run_auto_update(matches: &ArgMatches, user_config: &UserConfig) {
   let delay_secs =
     crate::core::user_config::parse_update_delay_secs(&user_config.behavior.auto_update_delay)
       .unwrap_or(0);
-  let update_result = tokio::task::spawn_blocking(move || cli::install_update_silent(delay_secs))
-    .await
-    .ok()
-    .and_then(|r| r.ok());
+  let update_result =
+    match tokio::task::spawn_blocking(move || cli::install_update_silent(delay_secs)).await {
+      Ok(Ok(outcome)) => Some(outcome),
+      Ok(Err(e)) => {
+        log::warn!("auto-update failed: {:#}", e);
+        None
+      }
+      Err(e) => {
+        log::warn!("auto-update task panicked: {}", e);
+        None
+      }
+    };
 
   match update_result {
     Some(cli::UpdateOutcome::Installed(new_version)) => {
@@ -633,7 +643,7 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
   }
 
   // Handle self-update command (doesn't need Spotify auth)
-  if handle_self_update_command(&matches)? {
+  if handle_self_update_command(&matches).await? {
     return Ok(());
   }
 

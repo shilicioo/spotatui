@@ -112,12 +112,16 @@ fn verify_release_checksum(release: &self_update::update::Release) -> Result<()>
       )
     })?;
 
+  // GitHub's API rejects requests without a User-Agent with 403, and asset URLs
+  // return JSON metadata instead of the file unless Accept is application/octet-stream.
   let client = reqwest::blocking::Client::builder()
+    .user_agent(concat!("spotatui/", env!("CARGO_PKG_VERSION")))
     .timeout(std::time::Duration::from_secs(60))
     .build()?;
 
   let checksum_text = client
     .get(&checksum_asset.download_url)
+    .header(reqwest::header::ACCEPT, "application/octet-stream")
     .send()?
     .error_for_status()?
     .text()?;
@@ -138,6 +142,7 @@ fn verify_release_checksum(release: &self_update::update::Release) -> Result<()>
 
   let binary_bytes = client
     .get(&asset.download_url)
+    .header(reqwest::header::ACCEPT, "application/octet-stream")
     .send()?
     .error_for_status()?
     .bytes()?;
