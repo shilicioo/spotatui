@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v0.39.0] 2026-06-12
 
 ### Added
 
@@ -17,9 +17,14 @@
 
 - **Ghost `spotatui` Connect devices**: The native streaming device id is now generated once and persisted in the streaming cache, and the old librespot session is shut down whenever the player is replaced, so app restarts and streaming recoveries no longer leave a trail of dead `spotatui` entries in Spotify's device list ([#297](https://github.com/LargeModGames/spotatui/issues/297)).
 - **Native device selection and playback startup**: Made the local `spotatui` Connect device selectable when Spotify's devices API omits it, recovered stale native streaming sessions after long idle, fixed `Esc`/`Enter` handling in the device selector, and avoided `NO_ACTIVE_DEVICE` playback failures when native streaming is connected but no Spotify playback context is active ([#292](https://github.com/LargeModGames/spotatui/issues/292)).
+- **Native streaming keeps playback local and surfaces failures**: With native streaming active, playback now stays on the local `spotatui` device instead of silently leaking to the official Spotify client, and streaming errors are reported instead of failing quietly ([#282](https://github.com/LargeModGames/spotatui/issues/282)).
 - **Search box no longer traps focus on submit**: Pressing `Enter` to run a search now always moves focus to the results list, including when re-searching while already on the Search screen (previously focus stayed stuck in the input box) ([#191](https://github.com/LargeModGames/spotatui/issues/191)).
 - **Cover-art load failures are non-fatal**: A failed album-image fetch is now logged and ignored instead of surfacing a blocking error and aborting the now-playing update, so playback metadata keeps updating when artwork can't be loaded ([#142](https://github.com/LargeModGames/spotatui/issues/142)).
 - **Settings list scrolls to follow the selection**: The Settings screen now renders its item list statefully, so the viewport scrolls to keep the highlighted setting in view instead of clipping items below the fold on shorter terminals (previously only fully visible when the terminal was tall enough to show every item). The selected row is now also marked with a `▶` indicator, matching the other list screens.
+
+### Changed
+
+- **Dependency maintenance**: Bumped the grouped Rust minor dependency set (`ratatui`, `chrono`, `log`, `ratatui-image`, `serde_json`), `sha2`, and `tar` ([#283](https://github.com/LargeModGames/spotatui/pull/283), [#284](https://github.com/LargeModGames/spotatui/pull/284), [#286](https://github.com/LargeModGames/spotatui/pull/286), [#289](https://github.com/LargeModGames/spotatui/pull/289)).
 
 ## [v0.38.6] 2026-05-28
 
