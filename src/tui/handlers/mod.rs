@@ -78,6 +78,29 @@ fn should_route_friends_before_globals(key: Key, app: &App) -> bool {
 }
 
 pub fn handle_app(key: Key, app: &mut App) {
+  // Plugin popup is a modal: intercept all keys before anything else.
+  if app.plugin_popup.is_some() {
+    match key {
+      Key::Esc | Key::Char('q') => {
+        app.plugin_popup = None;
+        app.plugin_popup_scroll = 0;
+      }
+      Key::Up | Key::Char('k') => {
+        app.plugin_popup_scroll = app.plugin_popup_scroll.saturating_sub(1);
+      }
+      Key::Down | Key::Char('j') => {
+        let max_scroll = app
+          .plugin_popup
+          .as_ref()
+          .map(|p| p.lines.len().saturating_sub(1) as u16)
+          .unwrap_or(0);
+        app.plugin_popup_scroll = app.plugin_popup_scroll.saturating_add(1).min(max_scroll);
+      }
+      _ => {} // swallow all other keys
+    }
+    return;
+  }
+
   if app.get_current_route().active_block == ActiveBlock::Settings
     && (app.settings_unsaved_prompt_visible || app.settings_edit_mode)
   {
@@ -229,6 +252,14 @@ pub fn handle_app(key: Key, app: &mut App) {
         handle_block_events(key, app);
       } else {
         playbar::toggle_like_currently_playing_item(app);
+      }
+    }
+    #[cfg(feature = "scripting")]
+    _ if app.user_config.plugin_command_keys.contains_key(&key) => {
+      if is_input_mode(app) {
+        handle_block_events(key, app);
+      } else if let Some(name) = app.user_config.plugin_command_keys.get(&key).cloned() {
+        app.queue_plugin_command(name);
       }
     }
     _ if key == app.user_config.keys.generate_recap => {

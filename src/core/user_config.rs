@@ -2,6 +2,7 @@ use crate::tui::event::Key;
 use anyhow::{anyhow, Result};
 use ratatui::style::{Color, Style};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{fs, path::PathBuf};
 
 const FILE_NAME: &str = "config.yml";
@@ -84,7 +85,7 @@ pub fn format_update_delay_secs(secs: u64) -> String {
   }
 }
 
-fn default_app_config_dir() -> Option<PathBuf> {
+pub(crate) fn default_app_config_dir() -> Option<PathBuf> {
   dirs::home_dir().map(|home| home.join(CONFIG_DIR).join(APP_CONFIG_DIR))
 }
 
@@ -808,6 +809,7 @@ pub struct UserConfigString {
   keybindings: Option<KeyBindingsString>,
   behavior: Option<BehaviorConfigString>,
   theme: Option<UserTheme>,
+  plugin_commands: Option<HashMap<String, String>>,
 }
 
 #[derive(Clone)]
@@ -818,6 +820,8 @@ pub struct UserConfig {
   pub custom_theme: Theme,
   pub behavior: BehaviorConfig,
   pub path_to_config: Option<UserConfigPaths>,
+  /// Keybindings for plugin commands: key -> command name.
+  pub plugin_command_keys: HashMap<Key, String>,
 }
 
 impl UserConfig {
@@ -882,6 +886,7 @@ impl UserConfig {
         like_track: Key::Char('F'),
         generate_recap: Key::Char('R'),
       },
+      plugin_command_keys: HashMap::new(),
       behavior: BehaviorConfig {
         seek_milliseconds: 5 * 1000,
         volume_increment: 10,
@@ -1274,6 +1279,75 @@ impl UserConfig {
     Ok(())
   }
 
+  fn named_action_keys(&self) -> Vec<Key> {
+    let k = &self.keys;
+    vec![
+      k.back,
+      k.next_page,
+      k.previous_page,
+      k.jump_to_start,
+      k.jump_to_end,
+      k.jump_to_album,
+      k.jump_to_artist_album,
+      k.jump_to_context,
+      k.manage_devices,
+      k.decrease_volume,
+      k.increase_volume,
+      k.toggle_playback,
+      k.seek_backwards,
+      k.seek_forwards,
+      k.next_track,
+      k.previous_track,
+      k.force_previous_track,
+      k.help,
+      k.shuffle,
+      k.repeat,
+      k.search,
+      k.submit,
+      k.copy_song_url,
+      k.copy_album_url,
+      k.audio_analysis,
+      k.lyrics_view,
+      k.miniplayer_view,
+      k.cover_art_view,
+      k.add_item_to_queue,
+      k.show_queue,
+      k.open_settings,
+      k.save_settings,
+      k.listening_party,
+      k.like_track,
+      k.generate_recap,
+    ]
+  }
+
+  pub fn load_plugin_commands(&mut self, entries: HashMap<String, String>) {
+    let named_keys = self.named_action_keys();
+    let mut result: HashMap<Key, String> = HashMap::new();
+    for (cmd_name, key_str) in entries {
+      let key = match parse_key(key_str.clone()) {
+        Ok(k) => k,
+        Err(e) => {
+          log::warn!(
+            "[config] plugin_commands: skipping '{cmd_name}': invalid key '{key_str}': {e}"
+          );
+          continue;
+        }
+      };
+      if let Err(e) = check_reserved_keys(key) {
+        log::warn!("[config] plugin_commands: skipping '{cmd_name}': {e}");
+        continue;
+      }
+      if named_keys.contains(&key) {
+        log::warn!(
+          "[config] plugin_commands: skipping '{cmd_name}': key '{key_str}' collides with a named action"
+        );
+        continue;
+      }
+      result.insert(key, cmd_name);
+    }
+    self.plugin_command_keys = result;
+  }
+
   pub fn load_config(&mut self) -> Result<()> {
     let paths = match &self.path_to_config {
       Some(path) => path,
@@ -1300,6 +1374,9 @@ impl UserConfig {
       }
       if let Some(theme) = config_yml.theme {
         self.load_theme(theme)?;
+      }
+      if let Some(plugin_commands) = config_yml.plugin_commands {
+        self.load_plugin_commands(plugin_commands);
       }
 
       Ok(())
@@ -1473,6 +1550,7 @@ impl UserConfig {
           keybindings: Some(build_keybindings()),
           behavior: Some(build_behavior()),
           theme: Some(build_theme()),
+          plugin_commands: None,
         }
       }
     } else {
@@ -1480,6 +1558,7 @@ impl UserConfig {
         keybindings: Some(build_keybindings()),
         behavior: Some(build_behavior()),
         theme: Some(build_theme()),
+        plugin_commands: None,
       }
     };
 
@@ -1796,5 +1875,61 @@ mod tests {
       serde_yaml::from_str("playbar_cover_art_size_percent: 250").unwrap();
     config.load_behaviorconfig(behavior).unwrap();
     assert_eq!(config.behavior.playbar_cover_art_size_percent, 200);
+  }
+
+  #[test]
+  fn plugin_commands_valid_entry_lands_in_plugin_command_keys() {
+    use super::UserConfig;
+    use crate::tui::event::Key;
+    use std::collections::HashMap;
+
+    let mut config = UserConfig::new();
+    let mut entries = HashMap::new();
+    entries.insert("toggle_lyrics".to_string(), "ctrl-g".to_string());
+    config.load_plugin_commands(entries);
+    assert_eq!(
+      config.plugin_command_keys.get(&Key::Ctrl('g')),
+      Some(&"toggle_lyrics".to_string())
+    );
+  }
+
+  #[test]
+  fn plugin_commands_reserved_key_is_skipped() {
+    use super::UserConfig;
+    use crate::tui::event::Key;
+    use std::collections::HashMap;
+
+    let mut config = UserConfig::new();
+    let mut entries = HashMap::new();
+    // 'j' is a reserved key
+    entries.insert("go_down".to_string(), "j".to_string());
+    config.load_plugin_commands(entries);
+    assert!(!config.plugin_command_keys.contains_key(&Key::Char('j')));
+  }
+
+  #[test]
+  fn plugin_commands_named_action_collision_is_skipped() {
+    use super::UserConfig;
+    use crate::tui::event::Key;
+    use std::collections::HashMap;
+
+    let mut config = UserConfig::new();
+    // 'q' is the default 'back' key
+    let mut entries = HashMap::new();
+    entries.insert("my_cmd".to_string(), "q".to_string());
+    config.load_plugin_commands(entries);
+    assert!(!config.plugin_command_keys.contains_key(&Key::Char('q')));
+  }
+
+  #[test]
+  fn plugin_commands_invalid_key_string_is_skipped() {
+    use super::UserConfig;
+    use std::collections::HashMap;
+
+    let mut config = UserConfig::new();
+    let mut entries = HashMap::new();
+    entries.insert("my_cmd".to_string(), "not-a-real-key".to_string());
+    config.load_plugin_commands(entries);
+    assert!(config.plugin_command_keys.is_empty());
   }
 }

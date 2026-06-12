@@ -800,10 +800,6 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
         title = format!("{} | {}", title, party_label);
       }
 
-      if let Some(message) = app.status_message.as_ref() {
-        title = format!("{} | {}", title, message);
-      }
-
       let current_route = app.get_current_route();
       let highlight_state = (
         matches!(
@@ -816,14 +812,30 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
         ),
       );
 
+      let mut title_spans = vec![Span::styled(
+        title,
+        get_color(highlight_state, app.user_config.theme),
+      )];
+      if let Some(message) = app.status_message.as_ref() {
+        let msg_style = if app.status_message_is_error {
+          Style::default().fg(app.user_config.theme.error_text)
+        } else {
+          get_color(highlight_state, app.user_config.theme)
+        };
+        title_spans.push(Span::styled(format!(" | {}", message), msg_style));
+      }
+      for seg in app.plugin_playbar_segments.values() {
+        title_spans.push(Span::styled(
+          format!(" | {}", seg),
+          Style::default().fg(app.user_config.theme.playbar_text),
+        ));
+      }
+
       let title_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .style(Style::default().bg(app.user_config.theme.playbar_background))
-        .title(Span::styled(
-          &title,
-          get_color(highlight_state, app.user_config.theme),
-        ))
+        .title(Line::from(title_spans))
         .border_style(get_color(highlight_state, app.user_config.theme));
 
       f.render_widget(title_block, layout_chunk);
@@ -967,14 +979,16 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
 
   if !drew_playbar {
     if let Some(message) = app.status_message.as_ref() {
+      let msg_style = if app.status_message_is_error {
+        Style::default().fg(app.user_config.theme.error_text)
+      } else {
+        Style::default().fg(app.user_config.theme.playbar_text)
+      };
       let title_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .style(Style::default().bg(app.user_config.theme.playbar_background))
-        .title(Span::styled(
-          format!("Status: {}", message),
-          Style::default().fg(app.user_config.theme.playbar_text),
-        ))
+        .title(Span::styled(format!("Status: {}", message), msg_style))
         .border_style(Style::default().fg(app.user_config.theme.inactive));
       f.render_widget(title_block, layout_chunk);
     }

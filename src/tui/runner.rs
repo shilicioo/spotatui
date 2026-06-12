@@ -8,6 +8,8 @@ use crate::infra::discord_rpc;
 #[cfg(all(feature = "mpris", target_os = "linux"))]
 use crate::infra::mpris;
 use crate::infra::network::IoEvent;
+#[cfg(feature = "scripting")]
+use crate::infra::scripting::ScriptEngine;
 use crate::tui::event::{self, Key};
 use crate::tui::handlers;
 use crate::tui::ui;
@@ -454,6 +456,21 @@ pub async fn start_ui(
   let mut window_title_state = WindowTitleState::default();
   let mut is_first_render = true;
 
+  #[cfg(feature = "scripting")]
+  let mut script_engine: Option<ScriptEngine> = match ScriptEngine::new() {
+    Ok(mut engine) => {
+      if let Some(config_dir) = crate::core::user_config::default_app_config_dir() {
+        let loaded = engine.load_user_scripts(&config_dir);
+        info!("loaded {loaded} lua plugin file(s)");
+      }
+      Some(engine)
+    }
+    Err(e) => {
+      log::error!("failed to initialize lua scripting engine: {e}");
+      None
+    }
+  };
+
   loop {
     let terminal_size = terminal.backend().size().ok();
     let title_update = {
@@ -537,6 +554,9 @@ pub async fn start_ui(
           }
           _ => ui::draw_main_layout(f, &app),
         }
+
+        // Plugin popup overlays every screen.
+        ui::draw_plugin_popup(f, &app);
       })?;
 
       if current_route.active_block == ActiveBlock::Input {
@@ -626,6 +646,10 @@ pub async fn start_ui(
         } else {
           handlers::handle_app(key, &mut app);
         }
+        #[cfg(feature = "scripting")]
+        if let Some(engine) = script_engine.as_mut() {
+          engine.run_pending_commands(&mut app);
+        }
       }
       event::Event::Mouse(mouse) => {
         let mut app = app.lock().await;
@@ -647,6 +671,11 @@ pub async fn start_ui(
         app.flush_pending_native_seek();
         app.flush_pending_api_seek();
         app.flush_pending_volume();
+
+        #[cfg(feature = "scripting")]
+        if let Some(engine) = script_engine.as_mut() {
+          engine.on_tick(&mut app);
+        }
 
         #[cfg(feature = "discord-rpc")]
         if let Some(ref manager) = discord_rpc_manager {
@@ -721,8 +750,20 @@ pub async fn start_ui(
       }
       app.dispatch(IoEvent::FetchAnnouncements);
       app.help_docs_size = ui::help::get_help_docs(&app).len() as u32;
+
+      #[cfg(feature = "scripting")]
+      if let Some(engine) = script_engine.as_mut() {
+        engine.on_start(&mut app);
+      }
+
       is_first_render = false;
     }
+  }
+
+  #[cfg(feature = "scripting")]
+  if let Some(engine) = script_engine.as_mut() {
+    let mut app = app.lock().await;
+    engine.on_quit(&mut app);
   }
 
   #[cfg(feature = "streaming")]

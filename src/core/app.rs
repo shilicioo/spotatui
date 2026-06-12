@@ -894,6 +894,8 @@ pub struct App {
   pub status_message: Option<String>,
   /// When to clear the status message
   pub status_message_expires_at: Option<Instant>,
+  /// True when the current status message is an error (blocks normal message overwrites)
+  pub status_message_is_error: bool,
   /// Listening party status
   pub party_status: PartyStatus,
   /// Active listening party session data
@@ -986,6 +988,14 @@ pub struct App {
   pub create_playlist_search_cursor: u16,
   pub create_playlist_selected_result: usize,
   pub create_playlist_focus: CreatePlaylistFocus,
+  /// Commands queued by keybindings for the scripting engine to run.
+  pub pending_plugin_commands: Vec<String>,
+  /// Per-plugin playbar segments, keyed by plugin name (BTreeMap for deterministic order).
+  pub plugin_playbar_segments: std::collections::BTreeMap<String, String>,
+  /// Currently displayed plugin popup, if any.
+  pub plugin_popup: Option<crate::core::plugin_api::PluginPopup>,
+  /// Scroll offset for the plugin popup.
+  pub plugin_popup_scroll: u16,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1134,6 +1144,7 @@ impl Default for App {
       last_party_sync_at: Instant::now(),
       status_message: None,
       status_message_expires_at: None,
+      status_message_is_error: false,
       party_status: PartyStatus::default(),
       party_session: None,
       party_input: Vec::new(),
@@ -1188,6 +1199,10 @@ impl Default for App {
       create_playlist_search_cursor: 0,
       create_playlist_selected_result: 0,
       create_playlist_focus: CreatePlaylistFocus::SearchInput,
+      pending_plugin_commands: Vec::new(),
+      plugin_playbar_segments: std::collections::BTreeMap::new(),
+      plugin_popup: None,
+      plugin_popup_scroll: 0,
     }
   }
 }
@@ -1389,8 +1404,32 @@ impl App {
   }
 
   pub fn set_status_message(&mut self, message: impl Into<String>, ttl_secs: u64) {
+    // A live error message blocks normal messages from overwriting it.
+    if self.status_message_is_error {
+      if let (Some(_), Some(expires_at)) = (&self.status_message, self.status_message_expires_at) {
+        if Instant::now() < expires_at {
+          return;
+        }
+      }
+    }
     self.status_message = Some(message.into());
     self.status_message_expires_at = Some(Instant::now() + Duration::from_secs(ttl_secs));
+    self.status_message_is_error = false;
+  }
+
+  /// Queue a plugin command name to be executed by the scripting engine.
+  #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+  pub fn queue_plugin_command(&mut self, name: String) {
+    self.pending_plugin_commands.push(name);
+  }
+
+  /// Set an error status message. Errors always replace whatever is currently shown
+  /// (including a previous error) and are styled distinctly in the UI.
+  #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+  pub fn set_error_status_message(&mut self, message: impl Into<String>, ttl_secs: u64) {
+    self.status_message = Some(message.into());
+    self.status_message_expires_at = Some(Instant::now() + Duration::from_secs(ttl_secs));
+    self.status_message_is_error = true;
   }
 
   #[cfg(feature = "streaming")]
@@ -1626,6 +1665,7 @@ impl App {
       if Instant::now() >= expires_at {
         self.status_message = None;
         self.status_message_expires_at = None;
+        self.status_message_is_error = false;
       }
     }
 
@@ -2006,6 +2046,43 @@ impl App {
       .as_ref()
       .and_then(|c| c.device.volume_percent)
       .unwrap_or(0)
+  }
+
+  /// Set volume to an absolute percentage (0-100). Routes through the same
+  /// native-streaming fast path and API coalescing logic as the keyboard
+  /// volume keys, so Lua actions behave identically to keypresses.
+  #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
+  pub fn set_volume_percent(&mut self, volume: u8) {
+    let next_volume = volume.min(100);
+    let current_volume = self.desired_volume() as u8;
+
+    if next_volume != current_volume {
+      info!("setting volume to {}", next_volume);
+      // Use native streaming player for instant control (bypasses event channel latency)
+      #[cfg(feature = "streaming")]
+      if self.is_native_streaming_active_for_playback() {
+        if let Some(ref player) = self.streaming_player {
+          player.set_volume(next_volume);
+
+          // Update UI state immediately
+          if let Some(ctx) = &mut self.current_playback_context {
+            ctx.device.volume_percent = Some(next_volume.into());
+          }
+          self.user_config.behavior.volume_percent = next_volume;
+          let _ = self.user_config.save_config();
+          self.pending_volume = Some(next_volume);
+          return;
+        }
+      }
+
+      // Fallback to API-based volume control for external devices
+      // Coalesce: only dispatch if no request is already in flight
+      self.pending_volume = Some(next_volume);
+      if !self.is_volume_change_in_flight {
+        self.is_volume_change_in_flight = true;
+        self.dispatch(IoEvent::ChangeVolume(next_volume));
+      }
+    }
   }
 
   /// Bump volume up. Uses `desired_volume()` as the base so rapid presses
@@ -4875,6 +4952,61 @@ mod tests {
       Some("No editable playlists available")
     );
     assert!(app.pending_playlist_track_add.is_none());
+  }
+
+  // --- status message priority tests ---
+
+  fn make_app_simple() -> App {
+    let (tx, _rx) = channel();
+    App::new(tx, UserConfig::new(), SystemTime::now())
+  }
+
+  #[test]
+  fn normal_message_does_not_overwrite_live_error() {
+    let mut app = make_app_simple();
+    app.set_error_status_message("plugin error", 6);
+    assert!(app.status_message_is_error);
+
+    app.set_status_message("now playing", 4);
+
+    assert_eq!(app.status_message.as_deref(), Some("plugin error"));
+    assert!(app.status_message_is_error);
+  }
+
+  #[test]
+  fn error_overwrites_normal_message() {
+    let mut app = make_app_simple();
+    app.set_status_message("now playing", 4);
+    assert!(!app.status_message_is_error);
+
+    app.set_error_status_message("plugin error", 6);
+
+    assert_eq!(app.status_message.as_deref(), Some("plugin error"));
+    assert!(app.status_message_is_error);
+  }
+
+  #[test]
+  fn error_overwrites_previous_error() {
+    let mut app = make_app_simple();
+    app.set_error_status_message("first error", 6);
+    app.set_error_status_message("second error", 6);
+
+    assert_eq!(app.status_message.as_deref(), Some("second error"));
+    assert!(app.status_message_is_error);
+  }
+
+  #[test]
+  fn normal_message_accepted_after_error_expires() {
+    let mut app = make_app_simple();
+    app.set_error_status_message("plugin error", 6);
+
+    // Simulate expiry by backdating the timestamp.
+    app.status_message_expires_at = Some(Instant::now() - Duration::from_secs(1));
+
+    app.set_status_message("now playing", 4);
+
+    assert_eq!(app.status_message.as_deref(), Some("now playing"));
+    assert!(!app.status_message_is_error);
   }
 
   #[test]

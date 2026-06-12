@@ -32,7 +32,7 @@ pub use self::player::draw_miniplayer;
 pub use self::player::{draw_device_list, draw_lyrics_view, draw_playbar};
 pub use self::popups::{
   draw_announcement_prompt, draw_dialog, draw_error_screen, draw_exit_prompt, draw_help_menu,
-  draw_party, draw_queue, draw_sort_menu,
+  draw_party, draw_plugin_popup, draw_queue, draw_sort_menu,
 };
 pub use self::search::{draw_input_and_help_box, draw_search_results};
 pub use self::tables::{

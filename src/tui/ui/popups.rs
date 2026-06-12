@@ -1,4 +1,5 @@
 use crate::core::app::{ActiveBlock, AnnouncementLevel, App, DialogContext};
+use crate::core::plugin_api::PopupLine;
 use crate::infra::network::sync::PartyStatus;
 use ratatui::{
   layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -800,4 +801,76 @@ pub fn draw_party(f: &mut Frame<'_>, app: &App) {
     .wrap(Wrap { trim: false });
 
   f.render_widget(paragraph, popup_area);
+}
+
+/// Draw the plugin popup overlay, if one is active.
+///
+/// Called last in the terminal draw closure so it overlays every screen.
+pub fn draw_plugin_popup(f: &mut Frame<'_>, app: &App) {
+  let popup = match &app.plugin_popup {
+    Some(p) => p,
+    None => return,
+  };
+
+  // Compute width: fit to longest line/title, clamped to 70% of area.
+  let area = f.area();
+  let max_width = (area.width as u32 * 70 / 100).min(u16::MAX as u32) as u16;
+  let content_width = popup
+    .lines
+    .iter()
+    .map(|l| l.text.len() as u16)
+    .chain(std::iter::once(popup.title.len() as u16))
+    .max()
+    .unwrap_or(0)
+    .saturating_add(4); // 2 border + 2 padding
+  let width = content_width.clamp(20, max_width);
+
+  // Height: line count + 2 borders + 1 footer, clamped.
+  let footer_lines = 1u16;
+  let content_height = popup.lines.len() as u16 + 2 + footer_lines;
+  let max_height = area.height.saturating_sub(2).max(3);
+  let height = content_height.clamp(4, max_height);
+
+  let rect = centered_modal_rect(area, width, height);
+  f.render_widget(Clear, rect);
+
+  // Build styled lines.
+  let mut ratatui_lines: Vec<Line> = popup.lines.iter().map(|pl| build_popup_line(pl)).collect();
+
+  // Footer hint.
+  ratatui_lines.push(Line::from(Span::styled(
+    "(Esc to close)",
+    Style::default().fg(app.user_config.theme.hint),
+  )));
+
+  let block = Block::default()
+    .borders(Borders::ALL)
+    .style(app.user_config.theme.base_style())
+    .border_style(Style::default().fg(app.user_config.theme.active))
+    .title(Span::styled(
+      popup.title.clone(),
+      Style::default()
+        .fg(app.user_config.theme.header)
+        .add_modifier(Modifier::BOLD),
+    ));
+
+  let paragraph = Paragraph::new(ratatui_lines)
+    .block(block)
+    .scroll((app.plugin_popup_scroll, 0));
+
+  f.render_widget(paragraph, rect);
+}
+
+fn build_popup_line<'a>(pl: &'a PopupLine) -> Line<'a> {
+  let mut style = Style::default();
+  if let Some(fg) = pl.fg {
+    style = style.fg(fg);
+  }
+  if pl.bold {
+    style = style.add_modifier(Modifier::BOLD);
+  }
+  if pl.italic {
+    style = style.add_modifier(Modifier::ITALIC);
+  }
+  Line::from(Span::styled(pl.text.clone(), style))
 }
