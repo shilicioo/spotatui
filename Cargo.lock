@@ -5673,8 +5673,8 @@ dependencies = [
  "tui-equalizer",
  "unicode-width",
  "url",
- "vergen",
- "vergen-gitcl",
+ "vergen 9.0.6",
+ "vergen-gitcl 10.0.0",
  "vergen-lib 10.0.0",
 ]
 
@@ -6654,17 +6654,6 @@ checksum = "9b07e6010c0f3e59fcb164e0163834597da68d1f864e2b8ca49f74de01e9c166"
 dependencies = [
  "anyhow",
  "derive_builder",
- "rustversion",
-]
-
-[[package]]
-name = "vergen-lib"
-version = "10.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "910e8471e27130bbc019e9bfa6bda16dfc4c6dd7c5d0793da70a9256caeae984"
-dependencies = [
- "anyhow",
- "bon",
  "rustversion",
 ]
 
