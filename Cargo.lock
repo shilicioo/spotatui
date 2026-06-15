@@ -3851,9 +3851,9 @@ dependencies = [
 
 [[package]]
 name = "openssl"
-version = "0.10.80"
+version = "0.10.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a45fa2aa886c42762255da344f0a0d313e254066c46aad76f300c3d3da62d967"
+checksum = "77823a27f0babb03091cb9ed9ef80af3b39dbc82f97e8fa530374b7dafd87a45"
 dependencies = [
  "bitflags 2.13.0",
  "cfg-if",
@@ -3891,9 +3891,9 @@ dependencies = [
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.116"
+version = "0.9.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f28a22dc7140cda5f096e5e7724a6962ca81a7f8bfd2979f9b18c11af56318c4"
+checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
 dependencies = [
  "cc",
  "libc",
@@ -6318,9 +6318,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui-bar-graph"
-version = "0.3.3"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "072ce7dd14a4cffcff2727d22b4a643b0eb06564bc49b279cb870e3d196a9dbf"
+checksum = "730c88948c610533fcfd117dacb051bccb19de70d8d96775379867a1550d9540"
 dependencies = [
  "colorgrad",
  "document-features",
@@ -6330,11 +6330,10 @@ dependencies = [
 
 [[package]]
 name = "tui-equalizer"
-version = "0.2.0-alpha"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "578975c9dc80c6a6c0764df86f2a6b9f9db77176b1939ed37a26347412eb8ed0"
+checksum = "f700ba65fd0f572f4f695d2d781a1711add32444804f745b504bbca6056902b8"
 dependencies = [
- "derive_builder",
  "ratatui-core",
 ]
 
